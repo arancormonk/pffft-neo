@@ -68,15 +68,27 @@ typedef union v4sf_union {
 #define VADD(a, b)      vaddq_f32(a, b)
 /* Use true fused multiply-add when available (AArch64 always, ARMv7 with VFPv4+) */
 #if defined(PFFFT_DISABLE_FMA)
-#define VMADD(a, b, c) vaddq_f32(c, vmulq_f32(a, b))
-#define VMSUB(a, b, c) vsubq_f32(c, vmulq_f32(a, b))
+#define VMADD(a, b, c)  vaddq_f32(c, vmulq_f32(a, b))
+#define VMSUB(a, b, c)  vsubq_f32(c, vmulq_f32(a, b))
+#define VMSUBR(a, b, c) vsubq_f32(vmulq_f32(a, b), c)
 #elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64) || defined(_M_ARM64EC)                           \
     || defined(__ARM_FEATURE_FMA)
-#define VMADD(a, b, c) vfmaq_f32(c, a, b)
-#define VMSUB(a, b, c) vfmsq_f32(c, a, b)
+#define VMADD(a, b, c)  vfmaq_f32(c, a, b)
+#define VMSUB(a, b, c)  vfmsq_f32(c, a, b)
+/* NEON fuses c + a*b and c - a*b only, so a*b - c takes a negation */
+#define VMSUBR(a, b, c) vfmaq_f32(vnegq_f32(c), a, b)
+/* (ar, ai) times (wr, -wi), see pf_float.h. Rather than negate a vector on
+   the way from ar to ai (VMSUBR), negate the scalar wi and multiply as
+   VCPLXMUL does. */
+#define SVCPLXMUL_NEGI(ar, ai, wr, wi)                                                                                 \
+    {                                                                                                                  \
+        const float nwi_ = -(wi);                                                                                      \
+        VCPLXMUL(ar, ai, LD_PS1(wr), LD_PS1(nwi_))                                                                     \
+    }
 #else
-#define VMADD(a, b, c) vmlaq_f32(c, a, b)
-#define VMSUB(a, b, c) vmlsq_f32(c, a, b)
+#define VMADD(a, b, c)  vmlaq_f32(c, a, b)
+#define VMSUB(a, b, c)  vmlsq_f32(c, a, b)
+#define VMSUBR(a, b, c) vsubq_f32(vmulq_f32(a, b), c)
 #endif
 #define VSUB(a, b)           vsubq_f32(a, b)
 #define LD_PS1(p)            vld1q_dup_f32(&(p))

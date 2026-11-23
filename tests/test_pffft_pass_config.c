@@ -7,6 +7,8 @@
   Tests of src/pffft_pass_config.h: what it leaves in PFFFT_TERMINAL_RADIX8
   and PFFFT_INPLACE_FIRST_PASS for the defaults and for definitions made
   before it, among them expressions without parentheses such as 0 ? 0 : 1.
+  PFFFT_DEPTH_FIRST, normalized the same way, has three cases of its own
+  at the end.
 
   The header is included once per case, each time with the definitions of
   that case (the include guard, the two switches and SIMD_SZ undefined in
@@ -288,6 +290,62 @@ static const t_case t_case_9 = T_CAPTURE("1 and 0, SIMD_SZ 4", 1, 0);
 #endif
 static const t_case t_case_10 = T_CAPTURE("0 and 1, SIMD_SZ 1", 0, 1);
 
+/* PFFFT_DEPTH_FIRST: the default, then expressions of value 1 and 0
+   without parentheses; the same captures as above */
+typedef struct {
+    const char* what;
+    int df;           /* the value the switch must have */
+    const char* text; /* its expansion */
+    int twice, less1, neg, and0, if_and0;
+} t_df_case;
+
+#define T_DF_CAPTURE(what, df)                                                                                         \
+    {what,                                                                                                             \
+     df,                                                                                                               \
+     T_STR(PFFFT_DEPTH_FIRST),                                                                                         \
+     2 * PFFFT_DEPTH_FIRST,                                                                                            \
+     PFFFT_DEPTH_FIRST - 1,                                                                                            \
+     -PFFFT_DEPTH_FIRST,                                                                                               \
+     PFFFT_DEPTH_FIRST && 0,                                                                                           \
+     T_IF_DF_AND0}
+
+#undef PFFFT_PASS_CONFIG_H
+#undef PFFFT_DEPTH_FIRST
+#include "pffft_pass_config.h"
+#if PFFFT_DEPTH_FIRST && 0
+#define T_IF_DF_AND0 1
+#else
+#define T_IF_DF_AND0 0
+#endif
+static const t_df_case t_df_case_1 = T_DF_CAPTURE("PFFFT_DEPTH_FIRST, default", 1);
+
+#undef PFFFT_PASS_CONFIG_H
+#undef PFFFT_DEPTH_FIRST
+#undef T_IF_DF_AND0
+#define PFFFT_DEPTH_FIRST 0 ? 0 : 1
+#include "pffft_pass_config.h"
+#if PFFFT_DEPTH_FIRST && 0
+#define T_IF_DF_AND0 1
+#else
+#define T_IF_DF_AND0 0
+#endif
+static const t_df_case t_df_case_2 = T_DF_CAPTURE("PFFFT_DEPTH_FIRST 0 ? 0 : 1", 1);
+
+#undef PFFFT_PASS_CONFIG_H
+#undef PFFFT_DEPTH_FIRST
+#undef T_IF_DF_AND0
+// NOLINTNEXTLINE(bugprone-macro-parentheses) -- deliberately unparenthesized build definition.
+#define PFFFT_DEPTH_FIRST 1 - 1
+#include "pffft_pass_config.h"
+#if PFFFT_DEPTH_FIRST && 0
+#define T_IF_DF_AND0 1
+#else
+#define T_IF_DF_AND0 0
+#endif
+static const t_df_case t_df_case_3 = T_DF_CAPTURE("PFFFT_DEPTH_FIRST 1 - 1", 0);
+
+static const t_df_case* const t_df_cases[] = {&t_df_case_1, &t_df_case_2, &t_df_case_3};
+
 static const t_case* const t_cases[] = {
     &t_case_1, &t_case_2, &t_case_3, &t_case_4, &t_case_5, &t_case_6, &t_case_7, &t_case_8, &t_case_9, &t_case_10,
 };
@@ -332,6 +390,18 @@ t_check_case(const t_case* c) {
     return fails;
 }
 
+static int
+t_check_df_case(const t_df_case* c) {
+    int fails = 0;
+    fails += t_text(c->what, "PFFFT_DEPTH_FIRST", c->text, c->df);
+    fails += t_int(c->what, "2 * PFFFT_DEPTH_FIRST", c->twice, 2 * c->df);
+    fails += t_int(c->what, "PFFFT_DEPTH_FIRST - 1", c->less1, c->df - 1);
+    fails += t_int(c->what, "-PFFFT_DEPTH_FIRST", c->neg, -c->df);
+    fails += t_int(c->what, "PFFFT_DEPTH_FIRST && 0", c->and0, 0);
+    fails += t_int(c->what, "#if PFFFT_DEPTH_FIRST && 0 compiled", c->if_and0, 0);
+    return fails;
+}
+
 int
 main(void) {
     int fails = 0;
@@ -339,10 +409,14 @@ main(void) {
     for (i = 0; i < sizeof(t_cases) / sizeof(t_cases[0]); ++i) {
         fails += t_check_case(t_cases[i]);
     }
+    for (i = 0; i < sizeof(t_df_cases) / sizeof(t_df_cases[0]); ++i) {
+        fails += t_check_df_case(t_df_cases[i]);
+    }
     if (fails) {
         printf("%d check(s) failed\n", fails);
         return 1;
     }
-    printf("all checks passed (%d cases)\n", (int)(sizeof(t_cases) / sizeof(t_cases[0])));
+    printf("all checks passed (%d cases)\n",
+           (int)(sizeof(t_cases) / sizeof(t_cases[0]) + sizeof(t_df_cases) / sizeof(t_df_cases[0])));
     return 0;
 }

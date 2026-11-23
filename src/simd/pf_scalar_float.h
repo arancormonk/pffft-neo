@@ -83,6 +83,11 @@ static ALWAYS_INLINE(v4sf) VMSUB(v4sf A, v4sf B, v4sf C) {
     return r;
 }
 
+static ALWAYS_INLINE(v4sf) VMSUBR(v4sf A, v4sf B, v4sf C) {
+    v4sf r = {A.a * B.a - C.a, A.b * B.b - C.b, A.c * B.c - C.c, A.d * B.d - C.d};
+    return r;
+}
+
 static ALWAYS_INLINE(v4sf) VSUB(v4sf A, v4sf B) {
     v4sf r = {A.a - B.a, A.b - B.b, A.c - B.c, A.d - B.d};
     return r;
@@ -160,13 +165,26 @@ typedef union v4sf_union {
     vsfscalar f[SIMD_SZ];
 } v4sf_union;
 
-#define VARCH                "Scalar"
-#define VREQUIRES_ALIGN      0
-#define VZERO()              0.f
-#define VMUL(a, b)           ((a) * (b))
-#define VADD(a, b)           ((a) + (b))
-#define VMADD(a, b, c)       ((a) * (b) + (c))
-#define VMSUB(a, b, c)       ((c) - (a) * (b))
+#define VARCH           "Scalar"
+#define VREQUIRES_ALIGN 0
+#define VZERO()         0.f
+#define VMUL(a, b)      ((a) * (b))
+#define VADD(a, b)      ((a) + (b))
+#define VMADD(a, b, c)  ((a) * (b) + (c))
+#define VMSUB(a, b, c)  ((c) - (a) * (b))
+#define VMSUBR(a, b, c) ((a) * (b) - (c))
+/* (ar, ai) times (wr, -wi), see pf_float.h. VCPLXMUL expands to one
+   expression per component here, and a compiler that contracts expressions
+   (FP_CONTRACT) chooses the product it fuses by its place in the
+   expression: this keeps the products where VCPLXMUL has them, and so has
+   its bits with and without contraction. */
+#define SVCPLXMUL_NEGI(ar, ai, wr, wi)                                                                                 \
+    {                                                                                                                  \
+        v4sf tmp;                                                                                                      \
+        tmp = ((ar) * (wi));                                                                                           \
+        (ar) = ((ar) * (wr) + (ai) * (wi));                                                                            \
+        (ai) = ((ai) * (wr) - (tmp));                                                                                  \
+    }
 #define VSUB(a, b)           ((a) - (b))
 #define LD_PS1(p)            (p)
 #define VLOAD_UNALIGNED(ptr) (*(ptr))

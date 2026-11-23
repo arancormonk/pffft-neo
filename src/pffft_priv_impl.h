@@ -166,8 +166,46 @@ struct SETUP_STRUCT {
     PFFFT_SETUP_FIELDS(v4sf, float)
 };
 
+#if PFFFT_DEPTH_FIRST && (SIMD_SZ == 4)
+/* The depth-first passes that come before the slices (pffft_passes_impl.h):
+   one pass makes the four streams of a block of four lanes. Sixteen slices
+   from two passes, a quarter the size and four streams more to combine,
+   measured up to 20% slower below 2^20 points and the same above. */
+#define PFFFT_DF_TOP 1
+
+/* PFFFT_DEPTH_FIRST for a complex transform of N: 0 for the other
+   schedule, else 1 + the number of depth-first passes within a slice.
+   depth_first: PFFFT_DF_AUTO, by the size of a buffer and with the leaves
+   of pffft_pass_config.h; PFFFT_DF_ON, whenever the plan allows it and as
+   deep as it allows; PFFFT_DF_OFF, never. */
+static int
+pffft_df_levels(int N, int depth_first) {
+    const int forced = depth_first == PFFFT_DF_ON;
+    int ifac[IFAC_MAX_SIZE], k, m;
+    if (depth_first == PFFFT_DF_OFF) {
+        return 0;
+    }
+    /* "+ 1 >" for ">=": a limit of 0 compares an unsigned value with it */
+    if (!forced && !((size_t)N * 2 * sizeof(float) + 1 > (size_t)(PFFFT_DEPTH_FIRST_MIN_BYTES))) {
+        return 0;
+    }
+    cffti1_factors(N / SIMD_SZ, ifac);
+    for (k = 0, m = 1; k < ifac[1]; ++k) {
+        m *= ifac[2 + k];
+    }
+    if (m != N / SIMD_SZ || !cfft_df_top(ifac, PFFFT_DF_TOP)) {
+        return 0;
+    }
+    return 1 + cfft_df_deep(ifac, N / SIMD_SZ / 4, PFFFT_DF_TOP, forced ? 0 : (size_t)(PFFFT_DEPTH_FIRST_LEAF_BYTES));
+}
+
+/* a depth-first setup: the order of the regions of a slice, 4^(df_levels
+   - 1) entries after the twiddles when df_levels > 1 */
+static ALWAYS_INLINE(int*) pffft_df_rev(const SETUP_STRUCT* s) { return (int*)(s->data + 2 * s->Ncvec); }
+#endif
+
 SETUP_STRUCT*
-FUNC_NEW_SETUP(int N, pffft_transform_t transform) {
+FUNC_NEW_SETUP(int N, pffft_transform_t transform, int depth_first) {
     SETUP_STRUCT* s = 0;
     int k, m;
     /* validate N for negative values or potential int overflow */
@@ -199,13 +237,30 @@ FUNC_NEW_SETUP(int N, pffft_transform_t transform) {
     s->kind = PFFFT_SETUP_KIND_NATIVE;
     /* nb of complex simd vectors */
     s->Ncvec = (transform == PFFFT_REAL ? N / 2 : N) / SIMD_SZ;
-    s->data = (v4sf*)FUNC_ALIGNED_MALLOC(2 * s->Ncvec * sizeof(v4sf));
+    s->df_levels = 0;
+    k = 0; /* the entries of pffft_df_rev */
+#if PFFFT_DEPTH_FIRST && (SIMD_SZ == 4)
+    if (transform == PFFFT_COMPLEX) {
+        s->df_levels = pffft_df_levels(N, depth_first);
+        if (s->df_levels > 1) {
+            k = 1 << (2 * (s->df_levels - 1));
+        }
+    }
+#else
+    (void)depth_first;
+#endif
+    s->data = (v4sf*)FUNC_ALIGNED_MALLOC(2 * s->Ncvec * sizeof(v4sf) + (size_t)k * sizeof(int));
     if (!s->data) {
         free(s);
         return NULL;
     }
     s->e = (float*)s->data;
     s->twiddle = (float*)(s->data + (2 * s->Ncvec * (SIMD_SZ - 1)) / SIMD_SZ);
+#if PFFFT_DEPTH_FIRST && (SIMD_SZ == 4)
+    if (k) {
+        cfft_df_rev(pffft_df_rev(s), k);
+    }
+#endif
 
 #if (SIMD_SZ > 1) /* scalar builds have no per-lane twiddles */
     for (k = 0; k < s->Ncvec; ++k) {
@@ -331,6 +386,7 @@ FUNC_ZREORDER(const SETUP_STRUCT* setup, const float* in, float* out, pffft_dire
 }
 
 #define PFFFT_CPLX_ORDERED 0
+#define PFFFT_CPLX_STREAMS 0
 #define PFFFT_CPLX_SCOPE
 #define PFFFT_CPLX_FINALIZE   FUNC_CPLX_FINALIZE
 #define PFFFT_CPLX_PREPROCESS FUNC_CPLX_PREPROCESS
@@ -346,9 +402,32 @@ FUNC_ZREORDER(const SETUP_STRUCT* setup, const float* in, float* out, pffft_dire
 #define PFFFT_CPLX_PREPROCESS pffft_cplx_preprocess_ordered
 #include "pffft_cplx_impl.h"
 #undef PFFFT_CPLX_ORDERED
-#undef PFFFT_CPLX_SCOPE
+#undef PFFFT_CPLX_STREAMS
 #undef PFFFT_CPLX_FINALIZE
 #undef PFFFT_CPLX_PREPROCESS
+
+#if PFFFT_DEPTH_FIRST
+/* the same for the depth-first transforms, whose passes leave the lanes'
+   blocks in four streams */
+#define PFFFT_CPLX_ORDERED    0
+#define PFFFT_CPLX_STREAMS    1
+#define PFFFT_CPLX_FINALIZE   pffft_cplx_finalize_df
+#define PFFFT_CPLX_PREPROCESS pffft_cplx_preprocess_df
+#include "pffft_cplx_impl.h"
+#undef PFFFT_CPLX_ORDERED
+#undef PFFFT_CPLX_FINALIZE
+#undef PFFFT_CPLX_PREPROCESS
+
+#define PFFFT_CPLX_ORDERED    1
+#define PFFFT_CPLX_FINALIZE   pffft_cplx_finalize_df_ordered
+#define PFFFT_CPLX_PREPROCESS pffft_cplx_preprocess_df_ordered
+#include "pffft_cplx_impl.h"
+#undef PFFFT_CPLX_ORDERED
+#undef PFFFT_CPLX_STREAMS
+#undef PFFFT_CPLX_FINALIZE
+#undef PFFFT_CPLX_PREPROCESS
+#endif
+#undef PFFFT_CPLX_SCOPE
 
 static ALWAYS_INLINE(void)
     FUNC_REAL_FINALIZE_4X4(const v4sf* in0, const v4sf* in1, const v4sf* in, const v4sf* e, v4sf* out) {
@@ -667,6 +746,42 @@ static NEVER_INLINE(void) pffft_transform_complex_inplace(const SETUP_STRUCT* se
         cfftf1_tail_ol_ps(Ncvec, vdata, work, 2, 1, 0, setup->twiddle, setup->ifac, +1, vdata);
     }
 }
+
+#if PFFFT_DEPTH_FIRST
+/* Complex transforms of a depth-first setup (pffft_passes_impl.h). The
+   passes run in the scratch buffer; finalize and preprocess go from it to
+   the output and from the input to it. The output buffer holds the
+   scratch of the slices until the result is stored, so input and output
+   may be the same buffer. */
+static NEVER_INLINE(void) pffft_transform_complex_df(const SETUP_STRUCT* setup, const float* input, float* output,
+                                                     v4sf* scratch, pffft_direction_t direction, int ordered) {
+    const int Ncvec = setup->Ncvec, deep = setup->df_levels - 1;
+    int stack_allocate = scratch ? 1 : Ncvec * 2;
+    VLA_ARRAY_ON_STACK(v4sf, scratch_on_stack, stack_allocate);
+    const v4sf* vinput = (const v4sf*)input;
+    const v4sf* e = (const v4sf*)setup->e;
+    const int* rev = pffft_df_rev(setup);
+    v4sf* voutput = (v4sf*)output;
+    v4sf* work = scratch ? scratch : scratch_on_stack;
+
+    assert(VALIGNED(input) && VALIGNED(output));
+    if (direction == PFFFT_FORWARD) {
+        cfftf1_df_ps(Ncvec, vinput, work, voutput, setup->twiddle, setup->ifac, PFFFT_DF_TOP, deep, rev);
+        if (ordered) {
+            pffft_cplx_finalize_df_ordered(Ncvec, work, voutput, e);
+        } else {
+            pffft_cplx_finalize_df(Ncvec, work, voutput, e);
+        }
+    } else {
+        if (ordered) {
+            pffft_cplx_preprocess_df_ordered(Ncvec, vinput, work, e);
+        } else {
+            pffft_cplx_preprocess_df(Ncvec, vinput, work, e);
+        }
+        cfftb1_df_ps(Ncvec, work, voutput, voutput, setup->twiddle, setup->ifac, PFFFT_DF_TOP, deep, rev);
+    }
+}
+#endif
 
 void
 FUNC_ZCONVOLVE_ACCUMULATE(const SETUP_STRUCT* s, const float* a, const float* b, float* ab, float scaling) {
@@ -1142,6 +1257,12 @@ void
 FUNC_TRANSFORM_UNORDRD(const SETUP_STRUCT* setup, const float* input, float* output, float* work,
                        pffft_direction_t direction) {
 #if SIMD_SZ == 4
+#if PFFFT_DEPTH_FIRST
+    if (setup->df_levels) {
+        pffft_transform_complex_df(setup, input, output, (v4sf*)work, direction, 0);
+        return;
+    }
+#endif
     if (input == output && setup->transform == PFFFT_COMPLEX && !(setup->ifac[1] & 1)) {
         pffft_transform_complex_inplace(setup, output, (v4sf*)work, direction);
         return;
@@ -1154,6 +1275,12 @@ void
 FUNC_TRANSFORM_ORDERED(const SETUP_STRUCT* setup, const float* input, float* output, float* work,
                        pffft_direction_t direction) {
 #if SIMD_SZ == 4
+#if PFFFT_DEPTH_FIRST
+    if (setup->df_levels) {
+        pffft_transform_complex_df(setup, input, output, (v4sf*)work, direction, 1);
+        return;
+    }
+#endif
     if (setup->transform == PFFFT_COMPLEX) {
         pffft_transform_complex_ordered(setup, input, output, (v4sf*)work, direction);
     } else if (input == output && !(setup->ifac[1] & 1)) {
@@ -1239,6 +1366,19 @@ pffft_assert4(vsfscalar v0, vsfscalar v1, vsfscalar v2, vsfscalar v3, float a, f
     pffft_assert1(v1, b, "[1]", functxt, numErrs, f, lineNo);
     pffft_assert1(v2, c, "[2]", functxt, numErrs, f, lineNo);
     pffft_assert1(v3, d, "[3]", functxt, numErrs, f, lineNo);
+}
+
+/* 1 when two vectors differ in a bit */
+static int
+pffft_lanes_differ(const v4sf_union* a, const v4sf_union* b) {
+    uint32_t ua[4], ub[4];
+    int k, differ = 0;
+    memcpy(ua, a->f, sizeof(ua));
+    memcpy(ub, b->f, sizeof(ub));
+    for (k = 0; k < 4; ++k) {
+        differ |= ua[k] != ub[k];
+    }
+    return differ;
 }
 
 #define PFFFT_ASSERT4(V, a, b, c, d, FUNCTXT)                                                                          \
@@ -1491,6 +1631,90 @@ FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
         PFFFT_ASSERT4(B, 1.0F, 2.0F, 3.0F, 4.0F, "VMSUB(): Inp B");
         PFFFT_ASSERT4(C, 100.0F, 101.0F, 102.0F, 103.0F, "VMSUB(): Inp C");
         PFFFT_ASSERT4(D, 89.0F, 77.0F, 63.0F, 47.0F, "VMSUB(): Out D");
+    }
+
+    {
+        v4sf_union A, B, C, D;
+        int k;
+        for (k = 0; k < 4; ++k) {
+            A.f[k] = 10 + k + 1;
+        }
+        for (k = 0; k < 4; ++k) {
+            B.f[k] = k + 1;
+        }
+        for (k = 0; k < 4; ++k) {
+            C.f[k] = 100 + k;
+        }
+        for (k = 0; k < 4; ++k) {
+            D.f[k] = 40 + k + 1;
+        }
+
+        if (DbgOut) {
+            fprintf(DbgOut, "\ninput: A,B,C = {\n");
+            fprintf(DbgOut, "  Inp A:  %f, %f, %f, %f\n", A.f[0], A.f[1], A.f[2], A.f[3]);
+            fprintf(DbgOut, "  Inp B:  %f, %f, %f, %f\n", B.f[0], B.f[1], B.f[2], B.f[3]);
+            fprintf(DbgOut, "  Inp C:  %f, %f, %f, %f\n", C.f[0], C.f[1], C.f[2], C.f[3]);
+            fprintf(DbgOut, "}\n");
+        }
+        D.v = VMSUBR(A.v, B.v, C.v);
+        if (DbgOut) {
+            fprintf(DbgOut, "D = VMSUBR(A,B,C) => {\n");
+            fprintf(DbgOut, "  Out D:  %f, %f, %f, %f\n", D.f[0], D.f[1], D.f[2], D.f[3]);
+            fprintf(DbgOut, "}\n");
+        }
+        PFFFT_ASSERT4(A, 11.0F, 12.0F, 13.0F, 14.0F, "VMSUBR(): Inp A");
+        PFFFT_ASSERT4(B, 1.0F, 2.0F, 3.0F, 4.0F, "VMSUBR(): Inp B");
+        PFFFT_ASSERT4(C, 100.0F, 101.0F, 102.0F, 103.0F, "VMSUBR(): Inp C");
+        PFFFT_ASSERT4(D, -89.0F, -77.0F, -63.0F, -47.0F, "VMSUBR(): Out D");
+    }
+
+    {
+        /* VADD_FSIGN, VSUB_FSIGN and VCPLXMUL_FSIGN have the bits of the
+           multiplication by the sign that they replace, also where zeros
+           of either sign and values that cancel meet: every combination of
+           the values below, a different one in each lane */
+        static const float vals[] = {0.0F, -0.0F, 1.0F, -1.0F, 3.0F, 0.3F, -0.7F, 1.0e-3F, -5.0e5F, 0.999999F};
+        const int nv = (int)(sizeof(vals) / sizeof(vals[0]));
+        int s, i, j, m, n, k, bad = 0;
+        for (s = 0; s < 2; ++s) {
+            const float fs = s ? -1.0F : 1.0F;
+            for (i = 0; i < nv; ++i) {
+                for (j = 0; j < nv; ++j) {
+                    for (m = 0; m < nv; ++m) {
+                        for (n = 0; n < nv; ++n) {
+                            const float wr = vals[m], wi = vals[n], swi = fs * vals[n];
+                            v4sf_union A, B, T, U, R, Q;
+                            for (k = 0; k < 4; ++k) {
+                                A.f[k] = vals[(i + k) % nv];
+                                B.f[k] = vals[(j + 3 * k) % nv];
+                            }
+                            T.v = VADD_FSIGN(A.v, B.v, fs);
+                            R.v = VADD(A.v, VMUL(B.v, LD_PS1(fs)));
+                            bad += pffft_lanes_differ(&T, &R);
+                            T.v = VSUB_FSIGN(A.v, B.v, fs);
+                            R.v = VSUB(A.v, VMUL(B.v, LD_PS1(fs)));
+                            bad += pffft_lanes_differ(&T, &R);
+                            T = A;
+                            U = B;
+                            VCPLXMUL_FSIGN(T.v, U.v, wr, wi, fs);
+                            R = A;
+                            Q = B;
+                            VCPLXMUL(R.v, Q.v, LD_PS1(wr), LD_PS1(swi));
+                            bad += pffft_lanes_differ(&T, &R) | pffft_lanes_differ(&U, &Q);
+                        }
+                    }
+                }
+            }
+        }
+        if (DbgOut) {
+            fprintf(DbgOut, "\nVADD_FSIGN, VSUB_FSIGN, VCPLXMUL_FSIGN => %d results differ from the multiplication\n",
+                    bad);
+        }
+        if (bad) {
+            fprintf(stderr, "VADD_FSIGN(), VSUB_FSIGN(), VCPLXMUL_FSIGN(): %d results differ from the multiplication\n",
+                    bad);
+            ++numErrs;
+        }
     }
 
     {

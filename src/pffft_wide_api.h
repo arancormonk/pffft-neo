@@ -14,7 +14,7 @@
 #ifndef PFFFT_WIDE_API_H
 #define PFFFT_WIDE_API_H
 
-PFFFT_Setup* pffft_w8_new_setup(int N, pffft_transform_t transform);
+PFFFT_Setup* pffft_w8_new_setup(int N, pffft_transform_t transform, int depth_first);
 void pffft_w8_transform(const PFFFT_Setup* setup, const float* input, float* output, float* work,
                         pffft_direction_t direction);
 void pffft_w8_transform_ordered(const PFFFT_Setup* setup, const float* input, float* output, float* work,

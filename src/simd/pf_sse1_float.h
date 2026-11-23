@@ -62,11 +62,13 @@ typedef union v4sf_union {
 /* see pf_fma_x86.h for why this is not just defined(__FMA__) */
 #ifdef PFFFT_X86_HAVE_FMA
 #include <immintrin.h>
-#define VMADD(a, b, c) _mm_fmadd_ps(a, b, c)
-#define VMSUB(a, b, c) _mm_fnmadd_ps(a, b, c)
+#define VMADD(a, b, c)  _mm_fmadd_ps(a, b, c)
+#define VMSUB(a, b, c)  _mm_fnmadd_ps(a, b, c)
+#define VMSUBR(a, b, c) _mm_fmsub_ps(a, b, c)
 #else
-#define VMADD(a, b, c) _mm_add_ps(_mm_mul_ps(a, b), c)
-#define VMSUB(a, b, c) _mm_sub_ps(c, _mm_mul_ps(a, b))
+#define VMADD(a, b, c)  _mm_add_ps(_mm_mul_ps(a, b), c)
+#define VMSUB(a, b, c)  _mm_sub_ps(c, _mm_mul_ps(a, b))
+#define VMSUBR(a, b, c) _mm_sub_ps(_mm_mul_ps(a, b), c)
 #endif
 #define VSUB(a, b)           _mm_sub_ps(a, b)
 #define LD_PS1(p)            _mm_set1_ps(p)

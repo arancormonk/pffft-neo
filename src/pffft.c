@@ -140,7 +140,7 @@ struct PFFFT_Setup {
 #define FUNC_ZCONVERT_ZP          pffft_native_zconvert_zp
 #define FUNC_ZCONVOLVE_ZP         pffft_native_zconvolve_zp
 #define FUNC_ZCONVOLVE_SCALE      pffft_native_zconvolve_scale
-PFFFT_Setup* pffft_native_new_setup(int N, pffft_transform_t transform);
+PFFFT_Setup* pffft_native_new_setup(int N, pffft_transform_t transform, int depth_first);
 void pffft_native_destroy_setup(PFFFT_Setup* setup);
 void pffft_native_transform(const PFFFT_Setup* setup, const float* input, float* output, float* work,
                             pffft_direction_t direction);
@@ -155,7 +155,7 @@ void pffft_native_zconvolve(const PFFFT_Setup* setup, const float* dft_a, const 
 int pffft_native_zconvert_zp(const PFFFT_Setup* setup, const float* in, float* out, float scaling);
 int pffft_native_zconvolve_zp(const PFFFT_Setup* setup, const float* dft_x, const float* dft_hzp, float* dft_ab);
 #else
-PFFFT_Setup* pffft_native_new_setup(int N, pffft_transform_t transform);
+PFFFT_Setup* pffft_native_new_setup(int N, pffft_transform_t transform, int depth_first);
 #define FUNC_NEW_SETUP            pffft_native_new_setup
 #define FUNC_DESTROY              pffft_destroy_setup
 #define FUNC_TRANSFORM_UNORDRD    pffft_transform
@@ -198,6 +198,19 @@ void pffft_cplx_preprocess(int n, const v4sf* in, v4sf* out, const v4sf* e);
 int
 pffft_setup_simd_size(const PFFFT_Setup* setup) {
     return setup->kind == PFFFT_SETUP_KIND_W8 ? 8 : SIMD_SZ;
+}
+
+int
+pffft_internal_depth_first_levels(const PFFFT_Setup* setup) {
+    return setup->df_levels;
+}
+
+/* the PFFFT_DF_* value of the PFFFT_BACKEND_* flags */
+static int
+pffft_backend_depth_first(int backend) {
+    return (backend & PFFFT_BACKEND_DEPTH_FIRST)     ? PFFFT_DF_ON
+           : (backend & PFFFT_BACKEND_BREADTH_FIRST) ? PFFFT_DF_OFF
+                                                     : PFFFT_DF_AUTO;
 }
 
 #if PFFFT_WIDE
@@ -294,24 +307,26 @@ pffft_wide_cpu_class(unsigned long long* l2) {
 
 PFFFT_Setup*
 pffft_internal_new_setup(int N, pffft_transform_t transform, int backend) {
+    const int depth_first = pffft_backend_depth_first(backend);
+    backend &= ~(PFFFT_BACKEND_DEPTH_FIRST | PFFFT_BACKEND_BREADTH_FIRST);
     if (backend != PFFFT_BACKEND_NATIVE) {
         unsigned long long l2 = 0;
         const int cls = pffft_wide_supports(N, transform) ? pffft_wide_cpu_class(&l2) : -1;
         if (backend == PFFFT_BACKEND_W8) {
-            return cls >= 0 ? pffft_w8_new_setup(N, transform) : NULL;
+            return cls >= 0 ? pffft_w8_new_setup(N, transform, depth_first) : NULL;
         }
         /* an allocation failure is reported, not retried with the other backend */
 #if defined(PFFFT_WIDE_ALL_SIZES)
         /* benchmarking: every supported size on every capable CPU */
         if (cls >= 0) {
-            return pffft_w8_new_setup(N, transform);
+            return pffft_w8_new_setup(N, transform, depth_first);
         }
 #endif
         if (cls >= 0 && pffft_wide_default(N, transform, cls, l2)) {
-            return pffft_w8_new_setup(N, transform);
+            return pffft_w8_new_setup(N, transform, depth_first);
         }
     }
-    return pffft_native_new_setup(N, transform);
+    return pffft_native_new_setup(N, transform, depth_first);
 }
 
 void
@@ -396,10 +411,12 @@ pffft_zconvolve_zp(const PFFFT_Setup* setup, const float* dft_x, const float* df
 
 PFFFT_Setup*
 pffft_internal_new_setup(int N, pffft_transform_t transform, int backend) {
+    const int depth_first = pffft_backend_depth_first(backend);
+    backend &= ~(PFFFT_BACKEND_DEPTH_FIRST | PFFFT_BACKEND_BREADTH_FIRST);
     if (backend == PFFFT_BACKEND_W8) {
         return NULL;
     }
-    return pffft_native_new_setup(N, transform);
+    return pffft_native_new_setup(N, transform, depth_first);
 }
 
 #endif /* PFFFT_WIDE */

@@ -454,6 +454,187 @@ done:
 }
 #endif
 
+/* negates the imaginary parts of the nvec vectors of x: the vectors at odd
+   positions (the passes' own layout, real and imaginary part in a vector
+   each), or with il the floats at odd positions (interleaved complex) */
+static void
+T_NAME(conjugate)(float* x, size_t nvec, int il) {
+    const size_t V = T_LANES;
+    size_t i, l;
+    for (i = 0; i < nvec; ++i) {
+        for (l = 0; l < V; ++l) {
+            if (il ? (l & 1) : (i & 1)) {
+                x[i * V + l] = -x[i * V + l];
+            }
+        }
+    }
+}
+
+/* the kinds of complex pass functions for test_pass_directions */
+enum {
+    T_NAME(PASS_PLAIN), /* passfR_ps */
+    T_NAME(PASS_IL),    /* passfR_il_ps: interleaved input */
+    T_NAME(PASS_IP),    /* passfR_ip_ps: in place */
+    T_NAME(PASS_IL_IP), /* passfR_il_ip_ps: interleaved input, in place */
+    T_NAME(PASS_OL),    /* passf4_ol_ps, passf8_ol_ps: interleaved output */
+    T_NAME(PASS_KINDS), /* their number */
+};
+
+/* whether the build has the pass function of that kind and radix for m
+   elements per leg and l1 groups */
+static int
+T_NAME(pass_exists)(int kind, int R, int m, int l1) {
+    const int fused = T_FUSED;
+    if (R == 8) {
+        /* one element per leg; without PFFFT_TERMINAL_RADIX8, one group */
+        if (m != 1 || (!PFFFT_TERMINAL_RADIX8 && l1 != 1)) {
+            return 0;
+        }
+        return kind == T_NAME(PASS_PLAIN) || (kind == T_NAME(PASS_OL) && fused && PFFFT_TERMINAL_RADIX8);
+    }
+    switch (kind) {
+        case T_NAME(PASS_PLAIN): return 1;
+        case T_NAME(PASS_IL): return fused && l1 == 1;
+        case T_NAME(PASS_IP): return fused && PFFFT_INPLACE_FIRST_PASS && l1 == 1 && m >= 2;
+        case T_NAME(PASS_IL_IP): return fused && PFFFT_INPLACE_FIRST_PASS && l1 == 1;
+        default: return fused && R == 4 && m == 1;
+    }
+}
+
+/* the pass function of that kind and radix (pass_exists) from in to out,
+   which hold nvec vectors; w: the twiddles of the legs */
+static void
+T_NAME(run_pass)(int kind, int R, int m, int l1, const float* in, float* out, size_t nvec, float* const* w,
+                 float fsign) {
+    const int idot = 2 * m;
+    const T_V* x = (const T_V*)in;
+    T_V* y = (T_V*)out;
+    if (kind == T_NAME(PASS_IP) || kind == T_NAME(PASS_IL_IP)) {
+        memcpy(out, in, nvec * T_LANES * sizeof(float));
+    }
+    if (kind == T_NAME(PASS_PLAIN)) {
+        switch (R) {
+            case 2: T_FN(passf2_ps)(idot, l1, x, y, w[0], fsign); break;
+            case 3: T_FN(passf3_ps)(idot, l1, x, y, w[0], w[1], fsign); break;
+            case 4: T_FN(passf4_ps)(idot, l1, x, y, w[0], w[1], w[2], fsign); break;
+            case 5: T_FN(passf5_ps)(idot, l1, x, y, w[0], w[1], w[2], w[3], fsign); break;
+            default: T_FN(passf8_ps)(idot, l1, x, y, fsign); break;
+        }
+        return;
+    }
+#if T_FUSED
+    if (kind == T_NAME(PASS_IL)) {
+        switch (R) {
+            case 2: T_FN(passf2_il_ps)(idot, x, y, w[0], fsign); break;
+            case 3: T_FN(passf3_il_ps)(idot, x, y, w[0], w[1], fsign); break;
+            case 4: T_FN(passf4_il_ps)(idot, x, y, w[0], w[1], w[2], fsign); break;
+            default: T_FN(passf5_il_ps)(idot, x, y, w[0], w[1], w[2], w[3], fsign); break;
+        }
+        return;
+    }
+    if (kind == T_NAME(PASS_OL)) {
+#if PFFFT_TERMINAL_RADIX8
+        if (R == 8) {
+            T_FN(passf8_ol_ps)(l1, x, y, fsign);
+            return;
+        }
+#endif
+        T_FN(passf4_ol_ps)(l1, x, y, fsign);
+        return;
+    }
+#if PFFFT_INPLACE_FIRST_PASS
+    if (kind == T_NAME(PASS_IP)) {
+        switch (R) {
+            case 2: T_FN(passf2_ip_ps)(idot, y, w[0], fsign); break;
+            case 3: T_FN(passf3_ip_ps)(idot, y, w[0], w[1], fsign); break;
+            case 4: T_FN(passf4_ip_ps)(idot, y, w[0], w[1], w[2], fsign); break;
+            default: T_FN(passf5_ip_ps)(idot, y, w[0], w[1], w[2], w[3], fsign); break;
+        }
+        return;
+    }
+    switch (R) {
+        case 2: T_FN(passf2_il_ip_ps)(idot, y, w[0], fsign); break;
+        case 3: T_FN(passf3_il_ip_ps)(idot, y, w[0], w[1], fsign); break;
+        case 4: T_FN(passf4_il_ip_ps)(idot, y, w[0], w[1], w[2], fsign); break;
+        default: T_FN(passf5_il_ip_ps)(idot, y, w[0], w[1], w[2], w[3], fsign); break;
+    }
+#endif
+#endif
+}
+
+/* The two directions of a pass are mirror images: all a pass does with
+   fsign is multiply imaginary parts by it, those of its twiddles and of
+   its own roots of unity, so the forward pass of x is the conjugate of the
+   backward pass of the conjugate of x, in every bit but the sign of a
+   zero. Each pass function holds a copy of its codelet for either
+   direction, without the multiplication (PF_PASS_DIRECTIONS in
+   pffft_passes_impl.h): the forward copy has other operations than the
+   backward one (VADD_FSIGN, VSUB_FSIGN, SVCPLXMUL_NEGI), and they have to
+   round as the multiplication did. */
+static int
+T_NAME(test_pass_directions)(void) {
+    static const int radices[] = {2, 3, 4, 5, 8};
+    static const int ms[] = {1, 2, 3, 8, 15};
+    static const int l1s[] = {1, 2, 5};
+    const int mmax = 15, lmax = 5, V = T_LANES;
+    const size_t cap = (size_t)2 * 8 * mmax * lmax * V;
+    float *x = t_alloc(cap), *xc = t_alloc(cap), *f = t_alloc(cap), *b = t_alloc(cap);
+    float* w[4] = {NULL, NULL, NULL, NULL};
+    int fails = 0, kind, ir, im, il1, j, cases = 0;
+    for (j = 0; j < 4; ++j) {
+        w[j] = t_alloc((size_t)2 * mmax);
+    }
+    if (!x || !xc || !f || !b || !w[0] || !w[1] || !w[2] || !w[3]) {
+        fails += T_CHECK(x && xc && f && b && w[0] && w[1] && w[2] && w[3]);
+        goto done;
+    }
+    for (j = 0; j < 4; ++j) {
+        t_fill(w[j], (size_t)2 * mmax);
+    }
+    for (kind = 0; kind < T_NAME(PASS_KINDS); ++kind) {
+        for (ir = 0; ir < (int)(sizeof(radices) / sizeof(radices[0])); ++ir) {
+            for (im = 0; im < (int)(sizeof(ms) / sizeof(ms[0])); ++im) {
+                for (il1 = 0; il1 < (int)(sizeof(l1s) / sizeof(l1s[0])); ++il1) {
+                    const int R = radices[ir], m = ms[im], l1 = l1s[il1];
+                    const size_t nvec = (size_t)2 * R * m * l1, len = nvec * V;
+                    const int in_il = kind == T_NAME(PASS_IL) || kind == T_NAME(PASS_IL_IP);
+                    size_t i, bad = 0;
+                    if (!T_NAME(pass_exists)(kind, R, m, l1)) {
+                        continue;
+                    }
+                    t_fill(x, len);
+                    T_NAME(run_pass)(kind, R, m, l1, x, f, nvec, w, -1.f);
+                    memcpy(xc, x, len * sizeof(float));
+                    T_NAME(conjugate)(xc, nvec, in_il);
+                    T_NAME(run_pass)(kind, R, m, l1, xc, b, nvec, w, +1.f);
+                    T_NAME(conjugate)(b, nvec, kind == T_NAME(PASS_OL));
+                    for (i = 0; i < len; ++i) {
+                        bad += f[i] != b[i]; /* as values: a zero of either sign is equal */
+                    }
+                    if (bad) {
+                        printf("  (pass kind %d, radix %d, %d elements per leg, l1 %d: %d values differ between the "
+                               "directions)\n",
+                               kind, R, m, l1, (int)bad);
+                    }
+                    fails += T_CHECK(bad == 0);
+                    ++cases;
+                }
+            }
+        }
+    }
+    /* every radix as a plain pass at least; more with the fused layout */
+    fails += T_CHECK(cases >= 5 * 3 * 4 + 1);
+done:
+    t_free(x);
+    t_free(xc);
+    t_free(f);
+    t_free(b);
+    for (j = 0; j < 4; ++j) {
+        t_free(w[j]);
+    }
+    return fails;
+}
+
 #if T_FUSED
 /* the routes of the complex drivers through every buffer arrangement the
    transforms use: cfftf1_il_ps with its input in work1 or in work2, and
@@ -567,6 +748,7 @@ T_NAME(run_backend_tests)(void) {
 #if PFFFT_INPLACE_FIRST_PASS && T_FUSED
     fails += T_NAME(test_inplace_codelets)();
 #endif
+    fails += T_NAME(test_pass_directions)();
 #if T_FUSED
     fails += T_NAME(test_driver_routes)();
 #endif
