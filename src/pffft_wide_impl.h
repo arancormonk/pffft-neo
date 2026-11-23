@@ -139,7 +139,9 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define radb2_ps             pffft_w8_radb2_ps
 #define radf3_ps             pffft_w8_radf3_ps
 #define radb3_ps             pffft_w8_radb3_ps
+#define radf4_groups         pffft_w8_radf4_groups
 #define radf4_ps             pffft_w8_radf4_ps
+#define radb4_groups         pffft_w8_radb4_groups
 #define radb4_ps             pffft_w8_radb4_ps
 #define radf5_ps             pffft_w8_radf5_ps
 #define radb5_ps             pffft_w8_radb5_ps
@@ -1109,7 +1111,9 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform) {
 #undef radf3_ps
 #undef radb3_ps
 #undef radf4_ps
+#undef radf4_groups
 #undef radb4_ps
+#undef radb4_groups
 #undef radf5_ps
 #undef radb5_ps
 #undef radf8_ps

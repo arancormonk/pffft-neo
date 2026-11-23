@@ -741,261 +741,143 @@ static NEVER_INLINE(void)
     }
 } /* radb3 */
 
-static NEVER_INLINE(void) radf4_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch,
-                                   const float* RESTRICT wa1, const float* RESTRICT wa2, const float* RESTRICT wa3) {
-    static const float minus_hsqt2 = (float)-M_SQRT1_2; /* -sin(pi/4) = -1/sqrt(2) */
-    int i, k, l1ido = l1 * ido;
-    {
-        const v4sf *RESTRICT cc_ = cc, *RESTRICT cc_end = cc + l1ido;
-        v4sf* RESTRICT ch_ = ch;
-        while (cc < cc_end) {
-            /* this loop represents between 25% and 40% of total radf4_ps cost ! */
-            v4sf a0 = VLD(cc, 0), a1 = VLD(cc, l1ido);
-            v4sf a2 = VLD(cc, 2 * l1ido), a3 = VLD(cc, 3 * l1ido);
-            v4sf tr1 = VADD(a1, a3);
-            v4sf tr2 = VADD(a0, a2);
-            VST(ch, 2 * ido - 1, VSUB(a0, a2));
-            VST(ch, 2 * ido, VSUB(a3, a1));
-            VST(ch, 0, VADD(tr1, tr2));
-            VST(ch, 4 * ido - 1, VSUB(tr2, tr1));
-            cc += ido;
-            ch += 4 * ido;
+/* Each forward group reads ido vectors from each of four legs separated by
+   stride, and writes 4 * ido consecutive vectors. The inverse exchanges
+   those layouts. Handle DC, the interior pairs and (for even ido) Nyquist
+   together to avoid separate sweeps over the same cache lines. */
+static ALWAYS_INLINE(void) radf4_groups(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1,
+                                        const float* wa2, const float* wa3) {
+    static const float minus_hsqt2 = (float)-M_SQRT1_2;
+    const int stride = l1 * ido;
+    for (int k = 0; k < l1; ++k, cc += ido, ch += 4 * ido) {
+        v4sf a0 = VLD(cc, 0), a1 = VLD(cc, stride), a2 = VLD(cc, 2 * stride), a3 = VLD(cc, 3 * stride);
+        v4sf tr1 = VADD(a1, a3), tr2 = VADD(a0, a2);
+        VST(ch, 0, VADD(tr1, tr2));
+        VST(ch, 2 * ido - 1, VSUB(a0, a2));
+        VST(ch, 2 * ido, VSUB(a3, a1));
+        VST(ch, 4 * ido - 1, VSUB(tr2, tr1));
+
+        for (int i = 2; i < ido; i += 2) {
+            v4sf cr2 = VLD(cc, stride + i - 1), ci2 = VLD(cc, stride + i);
+            v4sf cr3 = VLD(cc, 2 * stride + i - 1), ci3 = VLD(cc, 2 * stride + i);
+            v4sf cr4 = VLD(cc, 3 * stride + i - 1), ci4 = VLD(cc, 3 * stride + i);
+            VCPLXMULCONJ(cr2, ci2, LD_PS1(wa1[i - 2]), LD_PS1(wa1[i - 1]));
+            VCPLXMULCONJ(cr3, ci3, LD_PS1(wa2[i - 2]), LD_PS1(wa2[i - 1]));
+            VCPLXMULCONJ(cr4, ci4, LD_PS1(wa3[i - 2]), LD_PS1(wa3[i - 1]));
+
+            /* The second and fourth output legs store their pairs in reverse. */
+            v4sf sum_r = VADD(cr2, cr4), diff_i = VSUB(ci2, ci4);
+            v4sf even_r = VADD(VLD(cc, i - 1), cr3), odd_r = VSUB(VLD(cc, i - 1), cr3);
+            VST(ch, i - 1, VADD(sum_r, even_r));
+            VST(ch, 4 * ido - i - 1, VSUB(even_r, sum_r));
+            VST(ch, 2 * ido + i - 1, VADD(diff_i, odd_r));
+            VST(ch, 2 * ido - i - 1, VSUB(odd_r, diff_i));
+
+            v4sf sum_i = VADD(ci2, ci4), diff_r = VSUB(cr4, cr2);
+            v4sf even_i = VADD(VLD(cc, i), ci3), odd_i = VSUB(VLD(cc, i), ci3);
+            VST(ch, i, VADD(sum_i, even_i));
+            VST(ch, 4 * ido - i, VSUB(sum_i, even_i));
+            VST(ch, 2 * ido + i, VADD(diff_r, odd_i));
+            VST(ch, 2 * ido - i, VSUB(diff_r, odd_i));
         }
-        cc = cc_;
-        ch = ch_;
+        if (ido % 2 == 0) {
+            v4sf a = VLD(cc, ido - 1 + stride), b = VLD(cc, ido - 1 + 3 * stride);
+            v4sf c = VLD(cc, ido - 1), d = VLD(cc, ido - 1 + 2 * stride);
+            v4sf ti = SVMUL(minus_hsqt2, VADD(a, b)), tr = SVMUL(minus_hsqt2, VSUB(b, a));
+            VST(ch, ido - 1, VADD(tr, c));
+            VST(ch, 3 * ido - 1, VSUB(c, tr));
+            VST(ch, ido, VSUB(ti, d));
+            VST(ch, 3 * ido, VADD(ti, d));
+        }
     }
-    if (ido < 2) {
+}
+
+/* Specialize the twiddle-free case and the two short legs with a single
+   interior pair. The compiler can hoist their twiddles out of the group loop. */
+static NEVER_INLINE(void) radf4_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1,
+                                   const float* wa2, const float* wa3) {
+    if (ido == 1) {
+        radf4_groups(1, l1, cc, ch, wa1, wa2, wa3);
         return;
     }
     if (ido == 3) {
-        /* Fast path: inner loop executes exactly once with i=2, ic=ido-i=1 */
-        v4sf wr, wi, cr2, ci2, cr3, ci3, cr4, ci4;
-        v4sf tr1, ti1, tr2, ti2, tr3, ti3, tr4, ti4;
-        for (k = 0; k < l1ido; k += ido) {
-            cr2 = VLD(cc, 1 + k + 1 * l1ido);
-            ci2 = VLD(cc, 1 + k + 1 * l1ido + 1);
-            wr = LD_PS1(wa1[0]);
-            wi = LD_PS1(wa1[1]);
-            VCPLXMULCONJ(cr2, ci2, wr, wi);
-
-            cr3 = VLD(cc, 1 + k + 2 * l1ido);
-            ci3 = VLD(cc, 1 + k + 2 * l1ido + 1);
-            wr = LD_PS1(wa2[0]);
-            wi = LD_PS1(wa2[1]);
-            VCPLXMULCONJ(cr3, ci3, wr, wi);
-
-            cr4 = VLD(cc, 1 + k + 3 * l1ido);
-            ci4 = VLD(cc, 1 + k + 3 * l1ido + 1);
-            wr = LD_PS1(wa3[0]);
-            wi = LD_PS1(wa3[1]);
-            VCPLXMULCONJ(cr4, ci4, wr, wi);
-
-            tr1 = VADD(cr2, cr4);
-            tr4 = VSUB(cr4, cr2);
-            tr2 = VADD(VLD(cc, 1 + k), cr3);
-            tr3 = VSUB(VLD(cc, 1 + k), cr3);
-            VST(ch, 1 + 4 * k, VADD(tr1, tr2));
-            VST(ch, 0 + 4 * k + 3 * ido, VSUB(tr2, tr1));
-            ti1 = VADD(ci2, ci4);
-            ti4 = VSUB(ci2, ci4);
-            VST(ch, 1 + 4 * k + 2 * ido, VADD(ti4, tr3));
-            VST(ch, 0 + 4 * k + 1 * ido, VSUB(tr3, ti4));
-            ti2 = VADD(VLD(cc, 1 + k + 1), ci3);
-            ti3 = VSUB(VLD(cc, 1 + k + 1), ci3);
-            VST(ch, 2 + 4 * k, VADD(ti1, ti2));
-            VST(ch, 1 + 4 * k + 3 * ido, VSUB(ti1, ti2));
-            VST(ch, 2 + 4 * k + 2 * ido, VADD(tr4, ti3));
-            VST(ch, 1 + 4 * k + 1 * ido, VSUB(tr4, ti3));
-        }
+        radf4_groups(3, l1, cc, ch, wa1, wa2, wa3);
         return;
     }
-    if (ido != 2) {
-        for (k = 0; k < l1ido; k += ido) {
-            const v4sf* RESTRICT pc = (v4sf*)(cc + 1 + k);
-            for (i = 2; i < ido; i += 2, pc += 2) {
-                int ic = ido - i;
-                v4sf wr, wi, cr2, ci2, cr3, ci3, cr4, ci4;
-                v4sf tr1, ti1, tr2, ti2, tr3, ti3, tr4, ti4;
+    if (ido == 4) {
+        radf4_groups(4, l1, cc, ch, wa1, wa2, wa3);
+        return;
+    }
+    radf4_groups(ido, l1, cc, ch, wa1, wa2, wa3);
+}
 
-                cr2 = VLD(pc, 1 * l1ido + 0);
-                ci2 = VLD(pc, 1 * l1ido + 1);
-                wr = LD_PS1(wa1[i - 2]);
-                wi = LD_PS1(wa1[i - 1]);
-                VCPLXMULCONJ(cr2, ci2, wr, wi);
+static ALWAYS_INLINE(void) radb4_groups(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1,
+                                        const float* wa2, const float* wa3) {
+    static const float minus_sqrt2 = (float)-M_SQRT2, two = 2.f;
+    const int stride = l1 * ido;
+    for (int k = 0; k < l1; ++k, cc += 4 * ido, ch += ido) {
+        v4sf a = VLD(cc, 0), b = VLD(cc, 4 * ido - 1);
+        v4sf c = SVMUL(two, VLD(cc, 2 * ido)), d = SVMUL(two, VLD(cc, 2 * ido - 1));
+        v4sf sum = VADD(a, b), diff = VSUB(a, b);
+        VST(ch, 0, VADD(sum, d));
+        VST(ch, stride, VSUB(diff, c));
+        VST(ch, 2 * stride, VSUB(sum, d));
+        VST(ch, 3 * stride, VADD(diff, c));
 
-                cr3 = VLD(pc, 2 * l1ido + 0);
-                ci3 = VLD(pc, 2 * l1ido + 1);
-                wr = LD_PS1(wa2[i - 2]);
-                wi = LD_PS1(wa2[i - 1]);
-                VCPLXMULCONJ(cr3, ci3, wr, wi);
+        for (int i = 2; i < ido; i += 2) {
+            v4sf r0 = VLD(cc, i - 1), r1 = VLD(cc, 2 * ido - i - 1);
+            v4sf r2 = VLD(cc, 2 * ido + i - 1), r3 = VLD(cc, 4 * ido - i - 1);
+            v4sf i0 = VLD(cc, i), i1 = VLD(cc, 2 * ido - i);
+            v4sf i2 = VLD(cc, 2 * ido + i), i3 = VLD(cc, 4 * ido - i);
+            v4sf tr1 = VSUB(r0, r3), tr2 = VADD(r0, r3);
+            v4sf tr3 = VADD(r2, r1), ti4 = VSUB(r2, r1);
+            v4sf ti1 = VADD(i0, i3), ti2 = VSUB(i0, i3);
+            v4sf tr4 = VADD(i2, i1), ti3 = VSUB(i2, i1);
+            VST(ch, i - 1, VADD(tr2, tr3));
+            VST(ch, i, VADD(ti2, ti3));
 
-                cr4 = VLD(pc, 3 * l1ido);
-                ci4 = VLD(pc, 3 * l1ido + 1);
-                wr = LD_PS1(wa3[i - 2]);
-                wi = LD_PS1(wa3[i - 1]);
-                VCPLXMULCONJ(cr4, ci4, wr, wi);
-
-                /* at this point, on SSE, five of "cr2 cr3 cr4 ci2 ci3 ci4" should be loaded in registers */
-
-                tr1 = VADD(cr2, cr4);
-                tr4 = VSUB(cr4, cr2);
-                tr2 = VADD(VLD(pc, 0), cr3);
-                tr3 = VSUB(VLD(pc, 0), cr3);
-                VST(ch, i - 1 + 4 * k, VADD(tr1, tr2));
-                VST(ch, ic - 1 + 4 * k + 3 * ido, VSUB(tr2, tr1)); /* at this point tr1 and tr2 can be disposed */
-                ti1 = VADD(ci2, ci4);
-                ti4 = VSUB(ci2, ci4);
-                VST(ch, i - 1 + 4 * k + 2 * ido, VADD(ti4, tr3));
-                VST(ch, ic - 1 + 4 * k + 1 * ido, VSUB(tr3, ti4)); /* dispose tr3, ti4 */
-                ti2 = VADD(VLD(pc, 1), ci3);
-                ti3 = VSUB(VLD(pc, 1), ci3);
-                VST(ch, i + 4 * k, VADD(ti1, ti2));
-                VST(ch, ic + 4 * k + 3 * ido, VSUB(ti1, ti2));
-                VST(ch, i + 4 * k + 2 * ido, VADD(tr4, ti3));
-                VST(ch, ic + 4 * k + 1 * ido, VSUB(tr4, ti3));
-            }
+            v4sf cr2 = VSUB(tr1, tr4), ci2 = VADD(ti1, ti4);
+            v4sf cr3 = VSUB(tr2, tr3), ci3 = VSUB(ti2, ti3);
+            v4sf cr4 = VADD(tr1, tr4), ci4 = VSUB(ti1, ti4);
+            VCPLXMUL(cr2, ci2, LD_PS1(wa1[i - 2]), LD_PS1(wa1[i - 1]));
+            VST(ch, stride + i - 1, cr2);
+            VST(ch, stride + i, ci2);
+            VCPLXMUL(cr3, ci3, LD_PS1(wa2[i - 2]), LD_PS1(wa2[i - 1]));
+            VST(ch, 2 * stride + i - 1, cr3);
+            VST(ch, 2 * stride + i, ci3);
+            VCPLXMUL(cr4, ci4, LD_PS1(wa3[i - 2]), LD_PS1(wa3[i - 1]));
+            VST(ch, 3 * stride + i - 1, cr4);
+            VST(ch, 3 * stride + i, ci4);
         }
-        if (ido % 2 != 0) {
-            return;
+        if (ido % 2 == 0) {
+            v4sf r1 = VLD(cc, ido - 1), r3 = VLD(cc, 3 * ido - 1);
+            v4sf i1 = VLD(cc, ido), i3 = VLD(cc, 3 * ido);
+            v4sf tr1 = VSUB(r1, r3), tr2 = VADD(r1, r3);
+            v4sf ti1 = VADD(i3, i1), ti2 = VSUB(i3, i1);
+            VST(ch, ido - 1, VADD(tr2, tr2));
+            VST(ch, stride + ido - 1, SVMUL(minus_sqrt2, VSUB(ti1, tr1)));
+            VST(ch, 2 * stride + ido - 1, VADD(ti2, ti2));
+            VST(ch, 3 * stride + ido - 1, SVMUL(minus_sqrt2, VADD(ti1, tr1)));
         }
     }
-    for (k = 0; k < l1ido; k += ido) {
-        v4sf a = VLD(cc, ido - 1 + k + l1ido), b = VLD(cc, ido - 1 + k + 3 * l1ido);
-        v4sf c = VLD(cc, ido - 1 + k), d = VLD(cc, ido - 1 + k + 2 * l1ido);
-        v4sf ti1 = SVMUL(minus_hsqt2, VADD(a, b));
-        v4sf tr1 = SVMUL(minus_hsqt2, VSUB(b, a));
-        VST(ch, ido - 1 + 4 * k, VADD(tr1, c));
-        VST(ch, ido - 1 + 4 * k + 2 * ido, VSUB(c, tr1));
-        VST(ch, 4 * k + 1 * ido, VSUB(ti1, d));
-        VST(ch, 4 * k + 3 * ido, VADD(ti1, d));
-    }
-} /* radf4 */
+}
 
-static NEVER_INLINE(void) radb4_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch,
-                                   const float* RESTRICT wa1, const float* RESTRICT wa2, const float* RESTRICT wa3) {
-    static const float minus_sqrt2 = (float)-M_SQRT2; /* -2*sin(pi/4) = -sqrt(2) */
-    static const float two = 2.f;
-    int i, k, l1ido = l1 * ido;
-    v4sf ci2, ci3, ci4, cr2, cr3, cr4, ti1, ti2, ti3, ti4, tr1, tr2, tr3, tr4;
-    {
-        const v4sf *RESTRICT cc_ = cc, *RESTRICT ch_end = ch + l1ido;
-        v4sf* ch_ = ch;
-        while (ch < ch_end) {
-            v4sf a = VLD(cc, 0), b = VLD(cc, 4 * ido - 1);
-            v4sf c = VLD(cc, 2 * ido), d = VLD(cc, 2 * ido - 1);
-            tr3 = SVMUL(two, d);
-            tr2 = VADD(a, b);
-            tr1 = VSUB(a, b);
-            tr4 = SVMUL(two, c);
-            VST(ch, 0 * l1ido, VADD(tr2, tr3));
-            VST(ch, 2 * l1ido, VSUB(tr2, tr3));
-            VST(ch, 1 * l1ido, VSUB(tr1, tr4));
-            VST(ch, 3 * l1ido, VADD(tr1, tr4));
-
-            cc += 4 * ido;
-            ch += ido;
-        }
-        cc = cc_;
-        ch = ch_;
-    }
-    if (ido < 2) {
+static NEVER_INLINE(void) radb4_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1,
+                                   const float* wa2, const float* wa3) {
+    if (ido == 1) {
+        radb4_groups(1, l1, cc, ch, wa1, wa2, wa3);
         return;
     }
     if (ido == 3) {
-        /* Fast path: inner loop executes exactly once with i=2, ic=ido-i=1 */
-        v4sf wa1_r = LD_PS1(wa1[0]), wa1_i = LD_PS1(wa1[1]);
-        v4sf wa2_r = LD_PS1(wa2[0]), wa2_i = LD_PS1(wa2[1]);
-        v4sf wa3_r = LD_PS1(wa3[0]), wa3_i = LD_PS1(wa3[1]);
-        for (k = 0; k < l1ido; k += ido) {
-            tr1 = VSUB(VLD(cc, 1 + 4 * k), VLD(cc, 9 + 4 * k));
-            tr2 = VADD(VLD(cc, 1 + 4 * k), VLD(cc, 9 + 4 * k));
-            ti4 = VSUB(VLD(cc, 7 + 4 * k), VLD(cc, 3 + 4 * k));
-            tr3 = VADD(VLD(cc, 7 + 4 * k), VLD(cc, 3 + 4 * k));
-            VST(ch, k + 1, VADD(tr2, tr3));
-            cr3 = VSUB(tr2, tr3);
-
-            ti3 = VSUB(VLD(cc, 8 + 4 * k), VLD(cc, 4 + 4 * k));
-            tr4 = VADD(VLD(cc, 8 + 4 * k), VLD(cc, 4 + 4 * k));
-            cr2 = VSUB(tr1, tr4);
-            cr4 = VADD(tr1, tr4);
-
-            ti1 = VADD(VLD(cc, 2 + 4 * k), VLD(cc, 10 + 4 * k));
-            ti2 = VSUB(VLD(cc, 2 + 4 * k), VLD(cc, 10 + 4 * k));
-
-            VST(ch, k + 2, VADD(ti2, ti3));
-            ci3 = VSUB(ti2, ti3);
-            ci2 = VADD(ti1, ti4);
-            ci4 = VSUB(ti1, ti4);
-            VCPLXMUL(cr2, ci2, wa1_r, wa1_i);
-            VST(ch, k + 1 + l1ido, cr2);
-            VST(ch, k + 2 + l1ido, ci2);
-            VCPLXMUL(cr3, ci3, wa2_r, wa2_i);
-            VST(ch, k + 1 + 2 * l1ido, cr3);
-            VST(ch, k + 2 + 2 * l1ido, ci3);
-            VCPLXMUL(cr4, ci4, wa3_r, wa3_i);
-            VST(ch, k + 1 + 3 * l1ido, cr4);
-            VST(ch, k + 2 + 3 * l1ido, ci4);
-        }
+        radb4_groups(3, l1, cc, ch, wa1, wa2, wa3);
         return;
     }
-    if (ido != 2) {
-        for (k = 0; k < l1ido; k += ido) {
-            const v4sf* RESTRICT pc = (v4sf*)(cc - 1 + 4 * k);
-            v4sf* RESTRICT ph = ch + k + 1;
-            for (i = 2; i < ido; i += 2) {
-
-                tr1 = VSUB(VLD(pc, i), VLD(pc, 4 * ido - i));
-                tr2 = VADD(VLD(pc, i), VLD(pc, 4 * ido - i));
-                ti4 = VSUB(VLD(pc, 2 * ido + i), VLD(pc, 2 * ido - i));
-                tr3 = VADD(VLD(pc, 2 * ido + i), VLD(pc, 2 * ido - i));
-                VST(ph, 0, VADD(tr2, tr3));
-                cr3 = VSUB(tr2, tr3);
-
-                ti3 = VSUB(VLD(pc, 2 * ido + i + 1), VLD(pc, 2 * ido - i + 1));
-                tr4 = VADD(VLD(pc, 2 * ido + i + 1), VLD(pc, 2 * ido - i + 1));
-                cr2 = VSUB(tr1, tr4);
-                cr4 = VADD(tr1, tr4);
-
-                ti1 = VADD(VLD(pc, i + 1), VLD(pc, 4 * ido - i + 1));
-                ti2 = VSUB(VLD(pc, i + 1), VLD(pc, 4 * ido - i + 1));
-
-                VST(ph, 1, VADD(ti2, ti3));
-                ph += l1ido;
-                ci3 = VSUB(ti2, ti3);
-                ci2 = VADD(ti1, ti4);
-                ci4 = VSUB(ti1, ti4);
-                VCPLXMUL(cr2, ci2, LD_PS1(wa1[i - 2]), LD_PS1(wa1[i - 1]));
-                VST(ph, 0, cr2);
-                VST(ph, 1, ci2);
-                ph += l1ido;
-                VCPLXMUL(cr3, ci3, LD_PS1(wa2[i - 2]), LD_PS1(wa2[i - 1]));
-                VST(ph, 0, cr3);
-                VST(ph, 1, ci3);
-                ph += l1ido;
-                VCPLXMUL(cr4, ci4, LD_PS1(wa3[i - 2]), LD_PS1(wa3[i - 1]));
-                VST(ph, 0, cr4);
-                VST(ph, 1, ci4);
-                ph = ph - 3 * l1ido + 2;
-            }
-        }
-        if (ido % 2 != 0) {
-            return;
-        }
+    if (ido == 4) {
+        radb4_groups(4, l1, cc, ch, wa1, wa2, wa3);
+        return;
     }
-    for (k = 0; k < l1ido; k += ido) {
-        int i0 = 4 * k + ido;
-        v4sf c = VLD(cc, i0 - 1), d = VLD(cc, i0 + 2 * ido - 1);
-        v4sf a = VLD(cc, i0 + 0), b = VLD(cc, i0 + 2 * ido + 0);
-        tr1 = VSUB(c, d);
-        tr2 = VADD(c, d);
-        ti1 = VADD(b, a);
-        ti2 = VSUB(b, a);
-        VST(ch, ido - 1 + k + 0 * l1ido, VADD(tr2, tr2));
-        VST(ch, ido - 1 + k + 1 * l1ido, SVMUL(minus_sqrt2, VSUB(ti1, tr1)));
-        VST(ch, ido - 1 + k + 2 * l1ido, VADD(ti2, ti2));
-        VST(ch, ido - 1 + k + 3 * l1ido, SVMUL(minus_sqrt2, VADD(ti1, tr1)));
-    }
-} /* radb4 */
+    radb4_groups(ido, l1, cc, ch, wa1, wa2, wa3);
+}
 
 static NEVER_INLINE(void) radf5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1,
                                    const float* wa2, const float* wa3, const float* wa4) {
@@ -1249,15 +1131,15 @@ static NEVER_INLINE(v4sf*)
     v4sf* in = (v4sf*)input_readonly;
     v4sf* out = (in == work2 ? work1 : work2);
     int nf = ifac[1], k1;
-    int l2 = n;
-    int iw = n - 1;
+    int l1 = n, ido = 1;
     assert(in != out && work1 != work2);
     for (k1 = 1; k1 <= nf; ++k1) {
         int kh = nf - k1;
         int ip = ifac[kh + 2];
-        int l1 = l2 / ip;
-        int ido = n / l2;
-        iw -= (ip - 1) * ido;
+        /* For this stage n = l1 * ip * ido. Earlier stages reserve
+           (radix - 1) * inner floats each, totalling n - ip * ido. */
+        const int next_ido = ip * ido;
+        const float* w = wa + (n - next_ido);
 #if PFFFT_TERMINAL_RADIX8
         /* radix 8 is dispatched outside the switch: a fifth case makes GCC
        compile it to a jump table, an indirect jump. check_isa_baseline
@@ -1266,29 +1148,30 @@ static NEVER_INLINE(v4sf*)
        inlined into this driver. The complex drivers dispatch by if-chain
        for the same reason. */
         if (ip == 8) {
+            l1 /= 8;
             radf8_ps(ido, l1, in, out);
         } else
 #endif
             switch (ip) {
-                case 5: {
-                    int ix2 = iw + ido;
-                    int ix3 = ix2 + ido;
-                    int ix4 = ix3 + ido;
-                    radf5_ps(ido, l1, in, out, &wa[iw], &wa[ix2], &wa[ix3], &wa[ix4]);
-                } break;
-                case 4: {
-                    int ix2 = iw + ido;
-                    int ix3 = ix2 + ido;
-                    radf4_ps(ido, l1, in, out, &wa[iw], &wa[ix2], &wa[ix3]);
-                } break;
-                case 3: {
-                    int ix2 = iw + ido;
-                    radf3_ps(ido, l1, in, out, &wa[iw], &wa[ix2]);
-                } break;
-                case 2: radf2_ps(ido, l1, in, out, &wa[iw]); break;
+                case 5:
+                    l1 /= 5;
+                    radf5_ps(ido, l1, in, out, w, w + ido, w + 2 * ido, w + 3 * ido);
+                    break;
+                case 4:
+                    l1 /= 4;
+                    radf4_ps(ido, l1, in, out, w, w + ido, w + 2 * ido);
+                    break;
+                case 3:
+                    l1 /= 3;
+                    radf3_ps(ido, l1, in, out, w, w + ido);
+                    break;
+                case 2:
+                    l1 /= 2;
+                    radf2_ps(ido, l1, in, out, w);
+                    break;
                 default: assert(0); break;
             }
-        l2 = l1;
+        ido = next_ido;
         if (out == work2) {
             out = work1;
             in = work2;
@@ -1305,40 +1188,39 @@ static NEVER_INLINE(v4sf*)
     v4sf* in = (v4sf*)input_readonly;
     v4sf* out = (in == work2 ? work1 : work2);
     int nf = ifac[1], k1;
-    int l1 = 1;
-    int iw = 0;
+    int l1 = 1, ido = n;
     assert(in != out);
     for (k1 = 1; k1 <= nf; k1++) {
         int ip = ifac[k1 + 1];
-        int l2 = ip * l1;
-        int ido = n / l2;
+        /* Before division, ido spans all ip legs of this stage. */
+        const float* w = wa + (n - ido);
 #if PFFFT_TERMINAL_RADIX8
         /* outside the switch: no jump table, see rfftf1_ps */
         if (ip == 8) {
+            ido /= 8;
             radb8_ps(ido, l1, in, out);
         } else
 #endif
             switch (ip) {
-                case 5: {
-                    int ix2 = iw + ido;
-                    int ix3 = ix2 + ido;
-                    int ix4 = ix3 + ido;
-                    radb5_ps(ido, l1, in, out, &wa[iw], &wa[ix2], &wa[ix3], &wa[ix4]);
-                } break;
-                case 4: {
-                    int ix2 = iw + ido;
-                    int ix3 = ix2 + ido;
-                    radb4_ps(ido, l1, in, out, &wa[iw], &wa[ix2], &wa[ix3]);
-                } break;
-                case 3: {
-                    int ix2 = iw + ido;
-                    radb3_ps(ido, l1, in, out, &wa[iw], &wa[ix2]);
-                } break;
-                case 2: radb2_ps(ido, l1, in, out, &wa[iw]); break;
+                case 5:
+                    ido /= 5;
+                    radb5_ps(ido, l1, in, out, w, w + ido, w + 2 * ido, w + 3 * ido);
+                    break;
+                case 4:
+                    ido /= 4;
+                    radb4_ps(ido, l1, in, out, w, w + ido, w + 2 * ido);
+                    break;
+                case 3:
+                    ido /= 3;
+                    radb3_ps(ido, l1, in, out, w, w + ido);
+                    break;
+                case 2:
+                    ido /= 2;
+                    radb2_ps(ido, l1, in, out, w);
+                    break;
                 default: assert(0); break;
             }
-        l1 = l2;
-        iw += (ip - 1) * ido;
+        l1 *= ip;
 
         if (out == work2) {
             out = work1;
