@@ -2323,10 +2323,13 @@ static NEVER_INLINE(void)
 static NEVER_INLINE(void)
     cfft_df_backward_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa, const int* ifac, int levels) {
     const int leaves = 1 << (2 * levels), nleaf = n / leaves;
-    int leaf, level, w_leaf = iw;
-    for (level = 0; level < levels; ++level) {
-        w_leaf += 3 * (2 * (n >> (2 * level + 2)));
-    }
+    /* the twiddles of the leaves follow those of the levels, three legs of
+       2 * n / 4^(level + 1) floats at each level: 2 * (n - nleaf) in all.
+       (A loop that adds them up is a candidate for a compiler's vectorizer,
+       and MSVC's emits instructions beyond the baseline for it, selected
+       at run time, which check_isa_baseline rejects.) */
+    const int w_leaf = iw + 2 * (n - nleaf);
+    int leaf, level;
     for (leaf = 0; leaf < leaves; ++leaf) {
         int idot = 2 * nleaf, w = w_leaf; /* a leg of the group of a level, and its twiddles */
         cfft_df_leaf_ps(nleaf, x + 2 * leaf * nleaf, tmp, k1 + levels, w_leaf, wa, ifac, +1);
@@ -2427,10 +2430,10 @@ static NEVER_INLINE(void) cfftf1_df_slices_ps(int n, v4sf* x, v4sf* tmp, int k1,
 static NEVER_INLINE(void) cfftb1_df_slices_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa,
                                               const int* ifac, int top, int deep, const int* rev) {
     const int slices = 1 << (2 * top), nslice = n / slices;
-    int slice, level, w_slice = iw;
-    for (level = 0; level < top; ++level) {
-        w_slice += 3 * (2 * (n >> (2 * level + 2)));
-    }
+    /* the twiddles after those of the 'top' levels, as in
+       cfft_df_backward_ps */
+    const int w_slice = iw + 2 * (n - nslice);
+    int slice, level;
     for (slice = 0; slice < slices; ++slice) {
         int idot = 2 * nslice, w = w_slice;
         cfftb1_df_natural_ps(nslice, x + 2 * slice * nslice, tmp, k1 + top, w_slice, wa, ifac, deep, rev);
