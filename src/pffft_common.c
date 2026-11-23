@@ -22,8 +22,8 @@ Valigned_malloc(size_t nb_bytes) {
     }
     /* Take the padding from the low address bits, retaining the malloc pointer. */
     unsigned char* base = (unsigned char*)p0 + sizeof(void*);
-    size_t padding = (-(uintptr_t)base) & (MALLOC_V4SF_ALIGNMENT - 1);
-    p = base + padding;
+    uintptr_t misalignment = (uintptr_t)base & (MALLOC_V4SF_ALIGNMENT - 1);
+    p = base + ((MALLOC_V4SF_ALIGNMENT - misalignment) & (MALLOC_V4SF_ALIGNMENT - 1));
     *((void**)p - 1) = p0;
     return p;
 }
