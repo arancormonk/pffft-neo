@@ -21,9 +21,18 @@ extern "C" {
 PFFFT_EXPORT void validate_pffft_simd(void);
 PFFFT_EXPORT int validate_pffft_simd_ex(FILE* out);
 
-#define PFFFT_BACKEND_AUTO   0 /* what pffft_new_setup() picks */
-#define PFFFT_BACKEND_NATIVE 1 /* the pffft_simd_size()-lane implementation */
-#define PFFFT_BACKEND_W8     2 /* the 8-lane AVX2 backend; NULL when unavailable */
+#define PFFFT_BACKEND_AUTO          0 /* what pffft_new_setup() picks */
+#define PFFFT_BACKEND_NATIVE        1 /* the pffft_simd_size()-lane implementation */
+#define PFFFT_BACKEND_W8            2 /* the 8-lane AVX2 backend; NULL when unavailable */
+
+/* added to a backend: the pass schedule of a complex setup, which
+   pffft_new_setup() picks from the transform size (PFFFT_DEPTH_FIRST in
+   pffft_pass_config.h). PFFFT_BACKEND_DEPTH_FIRST applies it wherever the
+   plan allows it, at any size and with the smallest leaves, so that small
+   transforms run every step of it; PFFFT_BACKEND_BREADTH_FIRST never does.
+   The two schedules give the same forward results, bit for bit. */
+#define PFFFT_BACKEND_DEPTH_FIRST   0x100
+#define PFFFT_BACKEND_BREADTH_FIRST 0x200
 
 /*
   pffft_new_setup() with a forced backend. PFFFT_BACKEND_W8 ignores the
@@ -33,6 +42,11 @@ PFFFT_EXPORT int validate_pffft_simd_ex(FILE* out);
   built in, not supported by the CPU, or does not support N.
 */
 PFFFT_EXPORT PFFFT_Setup* pffft_internal_new_setup(int N, pffft_transform_t transform, int backend);
+
+/* 0 for a setup whose passes all sweep the buffer (real setups, small
+   ones, plans without leading radix-4 passes, PFFFT_DEPTH_FIRST off), else
+   1 + the number of depth-first passes within a slice */
+PFFFT_EXPORT int pffft_internal_depth_first_levels(const PFFFT_Setup* setup);
 
 #ifdef __cplusplus
 }

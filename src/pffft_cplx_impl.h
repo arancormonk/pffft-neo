@@ -56,24 +56,41 @@
    order to take advantage of SIMD instructions of modern CPUs.
 */
 
-/* Intentionally included twice, with PFFFT_CPLX_ORDERED set to 0 and 1.
-   Share the butterfly arithmetic while specializing only the input/output
-   layout. Keeping the unordered body intact avoids compiler scheduling
-   regressions in a loop that was already vectorized.
+/* Intentionally included several times, with PFFFT_CPLX_ORDERED set to 0
+   and 1 and, for the depth-first transforms, with PFFFT_CPLX_STREAMS set
+   to 1 (otherwise 0). Share the butterfly arithmetic while specializing
+   only the input/output layout. Keeping the unordered body intact avoids
+   compiler scheduling regressions in a loop that was already vectorized.
 
    The unordered variants read each block of 8 vectors before writing the
    same block, so they may run in place (in == out); the ordered ones
-   scatter their output and may not. */
+   scatter their output and may not.
+
+   PFFFT_CPLX_STREAMS: the lanes' transforms are in the layout of the
+   depth-first passes (pffft_passes_impl.h), four slices in natural
+   order: the four element pairs of block k are at k in each quarter of
+   the buffer, four streams, where they otherwise follow each other. The
+   spectrum is the same. Not in place. */
 
 PFFFT_CPLX_SCOPE void
 PFFFT_CPLX_FINALIZE(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
     int k, dk = Ncvec / SIMD_SZ; /* number of 4x4 matrix blocks */
     v4sf r0, i0, r1, i1, r2, i2, r3, i3;
     v4sf sr0, dr0, sr1, dr1, si0, di0, si1, di1;
-#if PFFFT_CPLX_ORDERED
+#if PFFFT_CPLX_ORDERED || PFFFT_CPLX_STREAMS
     assert(in != out);
 #endif
     for (k = 0; k < dk; ++k) {
+#if PFFFT_CPLX_STREAMS
+        r0 = in[2 * k];
+        i0 = in[2 * k + 1];
+        r1 = in[2 * (dk + k)];
+        i1 = in[2 * (dk + k) + 1];
+        r2 = in[2 * (2 * dk + k)];
+        i2 = in[2 * (2 * dk + k) + 1];
+        r3 = in[2 * (3 * dk + k)];
+        i3 = in[2 * (3 * dk + k) + 1];
+#else
         r0 = in[8 * k + 0];
         i0 = in[8 * k + 1];
         r1 = in[8 * k + 2];
@@ -82,6 +99,7 @@ PFFFT_CPLX_FINALIZE(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
         i2 = in[8 * k + 5];
         r3 = in[8 * k + 6];
         i3 = in[8 * k + 7];
+#endif
         VTRANSPOSE4(r0, r1, r2, r3);
         VTRANSPOSE4(i0, i1, i2, i3);
         VCPLXMUL(r1, i1, e[k * 6 + 0], e[k * 6 + 1]);
@@ -142,7 +160,7 @@ PFFFT_CPLX_PREPROCESS(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
     int k, dk = Ncvec / SIMD_SZ; /* number of 4x4 matrix blocks */
     v4sf r0, i0, r1, i1, r2, i2, r3, i3;
     v4sf sr0, dr0, sr1, dr1, si0, di0, si1, di1;
-#if PFFFT_CPLX_ORDERED
+#if PFFFT_CPLX_ORDERED || PFFFT_CPLX_STREAMS
     assert(in != out);
 #endif
     for (k = 0; k < dk; ++k) {
@@ -187,6 +205,16 @@ PFFFT_CPLX_PREPROCESS(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
         VTRANSPOSE4(r0, r1, r2, r3);
         VTRANSPOSE4(i0, i1, i2, i3);
 
+#if PFFFT_CPLX_STREAMS
+        out[2 * k] = r0;
+        out[2 * k + 1] = i0;
+        out[2 * (dk + k)] = r1;
+        out[2 * (dk + k) + 1] = i1;
+        out[2 * (2 * dk + k)] = r2;
+        out[2 * (2 * dk + k) + 1] = i2;
+        out[2 * (3 * dk + k)] = r3;
+        out[2 * (3 * dk + k) + 1] = i3;
+#else
         *out++ = r0;
         *out++ = i0;
         *out++ = r1;
@@ -195,5 +223,6 @@ PFFFT_CPLX_PREPROCESS(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
         *out++ = i2;
         *out++ = r3;
         *out++ = i3;
+#endif
     }
 }

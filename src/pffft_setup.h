@@ -22,6 +22,11 @@
 #define PFFFT_SETUP_KIND_NATIVE 0 /* the SIMD_SZ-lane implementation of pffft_priv_impl.h */
 #define PFFFT_SETUP_KIND_W8     1 /* 8-lane AVX2 float backend, pffft_wide_impl.h */
 
+/* PFFFT_DEPTH_FIRST (pffft_pass_config.h) for a new complex setup */
+#define PFFFT_DF_OFF            (-1) /* never */
+#define PFFFT_DF_AUTO           0    /* by the sizes of pffft_pass_config.h, where the plan allows it */
+#define PFFFT_DF_ON             1    /* wherever the plan allows it, and as deep as it allows */
+
 /*
   N
   Ncvec      nb of complex simd vectors (N/4 if PFFFT_COMPLEX, N/8 if PFFFT_REAL)
@@ -31,6 +36,14 @@
   data       allocated room for twiddle coefs
   e          points into 'data', N/4*3 elements
   twiddle    points into 'data', N/4 elements
+  df_levels  PFFFT_DEPTH_FIRST (pffft_passes_impl.h): 0 when all passes
+             sweep the buffer, else 1 + the number of depth-first passes
+             within a slice; the order of a slice's regions then follows
+             the twiddles in 'data'. Where pointers have 8 bytes the
+             member takes the place of padding: the size of the structure
+             decides where the allocator puts 'data', and that place
+             relative to the caller's buffers shows in the timings of
+             small transforms.
 */
 // The macro arguments are type names in member declarations.
 // NOLINTBEGIN(bugprone-macro-parentheses)
@@ -40,6 +53,7 @@
     int ifac[IFAC_MAX_SIZE];                                                                                           \
     pffft_transform_t transform;                                                                                       \
     int kind;                                                                                                          \
+    int df_levels;                                                                                                     \
     vector_type* data;                                                                                                 \
     real_type* e;                                                                                                      \
     real_type* twiddle;

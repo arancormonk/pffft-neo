@@ -154,6 +154,23 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define terminal_radix8_plan pffft_w8_terminal_radix8_plan
 #define rffti1_ps            pffft_w8_rffti1_ps
 #define cffti1_ps            pffft_w8_cffti1_ps
+#define cffti1_factors       pffft_w8_cffti1_factors
+#define cfft_df_top          pffft_w8_cfft_df_top
+#define cfft_df_deep         pffft_w8_cfft_df_deep
+#define cfft_df_rev          pffft_w8_cfft_df_rev
+#define passb4_dit_body      pffft_w8_passb4_dit_body
+#define passb4_dit_ip_ps     pffft_w8_passb4_dit_ip_ps
+#define passb4_dit_op_ps     pffft_w8_passb4_dit_op_ps
+#define passb4_dit_ol_ps     pffft_w8_passb4_dit_ol_ps
+#define cfft_df_leaf_ps      pffft_w8_cfft_df_leaf_ps
+#define cfft_df_forward_ps   pffft_w8_cfft_df_forward_ps
+#define cfft_df_backward_ps  pffft_w8_cfft_df_backward_ps
+#define cfftf1_df_natural_ps pffft_w8_cfftf1_df_natural_ps
+#define cfftb1_df_natural_ps pffft_w8_cfftb1_df_natural_ps
+#define cfftf1_df_slices_ps  pffft_w8_cfftf1_df_slices_ps
+#define cfftb1_df_slices_ps  pffft_w8_cfftb1_df_slices_ps
+#define cfftf1_df_ps         pffft_w8_cfftf1_df_ps
+#define cfftb1_df_ps         pffft_w8_cfftb1_df_ps
 #define cfftf1_il_ps         pffft_w8_cfftf1_il_ps
 #define cfftf1_tail_ps       pffft_w8_cfftf1_tail_ps
 #define cfftf1_tail_ol_ps    pffft_w8_cfftf1_tail_ol_ps
@@ -328,17 +345,36 @@ static ALWAYS_INLINE(void) w8_dft8(v4sf* xr, v4sf* xi, float fsign) {
 /* ---------------------------------------------------------------------- */
 /* complex transforms                                                     */
 
+/* Depth-first setups (pffft_passes_impl.h): the passes leave the lanes'
+   transforms as 16 slices, and the element pairs of a block are one in
+   each of 8 of them, 8 streams: pair j of block b is pair b / 2 of the
+   slice (j % 4) * 4 + 2 * (b % 2) + j / 4. In vectors, relative to pair
+   b / 2 of slice 0: */
+static ALWAYS_INLINE(int) w8_df_stream(int Ncvec, int b, int j) {
+    return 2 * (((j % 4) * 4 + 2 * (b % 2) + j / 4) * (Ncvec / 16));
+}
+
 /* Combine the 8 lanes after the passes: block b holds A_j(k) for
    k = 8b..8b+7 (sub-sequence j in lane sigma(j)) and produces the bins
-   8b+t + M*m at block position b + nb*m, interleaved when 'ordered'. */
-static ALWAYS_INLINE(void) w8_cplx_finalize_impl(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e, int ordered) {
+   8b+t + M*m at block position b + nb*m, interleaved when 'ordered'.
+   With 'streams' the blocks are in the streams of a depth-first setup. */
+static ALWAYS_INLINE(void)
+    w8_cplx_finalize_impl(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e, int ordered, int streams) {
     int b, j, nb = Ncvec / W8_SIMD_SZ;
     assert(in != out);
-    for (b = 0; b < nb; ++b, in += 16, e += 14) {
+    for (b = 0; b < nb; ++b, in += streams ? 0 : 16, e += 14) {
         v4sf tr[8], ti[8], xr[8], xi[8];
-        for (j = 0; j < 8; ++j) {
-            tr[j] = VLD(in, 2 * j);
-            ti[j] = VLD(in, 2 * j + 1);
+        if (streams) {
+            const v4sf* pair = in + 2 * (b / 2);
+            for (j = 0; j < 8; ++j) {
+                tr[j] = VLD(pair, w8_df_stream(Ncvec, b, j));
+                ti[j] = VLD(pair, w8_df_stream(Ncvec, b, j) + 1);
+            }
+        } else {
+            for (j = 0; j < 8; ++j) {
+                tr[j] = VLD(in, 2 * j);
+                ti[j] = VLD(in, 2 * j + 1);
+            }
         }
         w8_transpose8(tr);
         w8_transpose8(ti);
@@ -362,10 +398,11 @@ static ALWAYS_INLINE(void) w8_cplx_finalize_impl(int Ncvec, const v4sf* in, v4sf
     }
 }
 
-static ALWAYS_INLINE(void) w8_cplx_preprocess_impl(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e, int ordered) {
+static ALWAYS_INLINE(void)
+    w8_cplx_preprocess_impl(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e, int ordered, int streams) {
     int b, j, nb = Ncvec / W8_SIMD_SZ;
     assert(in != out);
-    for (b = 0; b < nb; ++b, out += 16, e += 14) {
+    for (b = 0; b < nb; ++b, out += streams ? 0 : 16, e += 14) {
         v4sf xr[8], xi[8], tr[8], ti[8];
         for (j = 0; j < 8; ++j) {
             const v4sf* i = in + 2 * (b + nb * j);
@@ -386,28 +423,55 @@ static ALWAYS_INLINE(void) w8_cplx_preprocess_impl(int Ncvec, const v4sf* in, v4
         }
         w8_transpose8(tr);
         w8_transpose8(ti);
-        for (j = 0; j < 8; ++j) {
-            VST(out, 2 * j, tr[j]);
-            VST(out, 2 * j + 1, ti[j]);
+        if (streams) {
+            v4sf* pair = out + 2 * (b / 2);
+            for (j = 0; j < 8; ++j) {
+                VST(pair, w8_df_stream(Ncvec, b, j), tr[j]);
+                VST(pair, w8_df_stream(Ncvec, b, j) + 1, ti[j]);
+            }
+        } else {
+            for (j = 0; j < 8; ++j) {
+                VST(out, 2 * j, tr[j]);
+                VST(out, 2 * j + 1, ti[j]);
+            }
         }
     }
 }
 
 static NEVER_INLINE(void) w8_cplx_finalize(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
-    w8_cplx_finalize_impl(Ncvec, in, out, e, 0);
+    w8_cplx_finalize_impl(Ncvec, in, out, e, 0, 0);
 }
 
 static NEVER_INLINE(void) w8_cplx_finalize_ordered(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
-    w8_cplx_finalize_impl(Ncvec, in, out, e, 1);
+    w8_cplx_finalize_impl(Ncvec, in, out, e, 1, 0);
 }
 
 static NEVER_INLINE(void) w8_cplx_preprocess(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
-    w8_cplx_preprocess_impl(Ncvec, in, out, e, 0);
+    w8_cplx_preprocess_impl(Ncvec, in, out, e, 0, 0);
 }
 
 static NEVER_INLINE(void) w8_cplx_preprocess_ordered(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
-    w8_cplx_preprocess_impl(Ncvec, in, out, e, 1);
+    w8_cplx_preprocess_impl(Ncvec, in, out, e, 1, 0);
 }
+
+#if PFFFT_DEPTH_FIRST
+/* the same for the depth-first transforms */
+static NEVER_INLINE(void) w8_cplx_finalize_df(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
+    w8_cplx_finalize_impl(Ncvec, in, out, e, 0, 1);
+}
+
+static NEVER_INLINE(void) w8_cplx_finalize_df_ordered(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
+    w8_cplx_finalize_impl(Ncvec, in, out, e, 1, 1);
+}
+
+static NEVER_INLINE(void) w8_cplx_preprocess_df(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
+    w8_cplx_preprocess_impl(Ncvec, in, out, e, 0, 1);
+}
+
+static NEVER_INLINE(void) w8_cplx_preprocess_df_ordered(int Ncvec, const v4sf* in, v4sf* out, const v4sf* e) {
+    w8_cplx_preprocess_impl(Ncvec, in, out, e, 1, 1);
+}
+#endif
 
 /* ---------------------------------------------------------------------- */
 /* real transforms                                                        */
@@ -863,10 +927,58 @@ static NEVER_INLINE(void)
     }
 }
 
+#if PFFFT_DEPTH_FIRST
+/* the depth-first passes that come before the slices (pffft_passes_impl.h):
+   two passes make the eight streams of a block of eight lanes */
+#define W8_DF_TOP 2
+
+/* a depth-first setup: the order of the regions of a slice, 4^(df_levels
+   - 1) entries after the twiddles when df_levels > 1 */
+static ALWAYS_INLINE(int*) w8_df_rev(const PFFFT_Setup* s) { return (int*)(s->e + 2 * s->Ncvec * W8_SIMD_SZ); }
+
+/* complex transforms of a depth-first setup: as pffft_transform_complex_df
+   of the 4-lane code */
+static NEVER_INLINE(void) pffft_w8_transform_complex_df(const PFFFT_Setup* setup, const float* input, float* output,
+                                                        v4sf* scratch, pffft_direction_t direction, int ordered) {
+    const int Ncvec = setup->Ncvec, deep = setup->df_levels - 1;
+    int stack_allocate = scratch ? 1 : Ncvec * 2;
+    VLA_ARRAY_ON_STACK(v4sf, scratch_on_stack, stack_allocate);
+    const v4sf* vinput = (const v4sf*)input;
+    const v4sf* e = (const v4sf*)setup->e;
+    const int* rev = w8_df_rev(setup);
+    v4sf* voutput = (v4sf*)output;
+    v4sf* work = scratch ? scratch : scratch_on_stack;
+
+    assert(W8_ALIGNED16(input) && W8_ALIGNED16(output));
+    if (direction == PFFFT_FORWARD) {
+        cfftf1_df_ps(Ncvec, vinput, work, voutput, setup->twiddle, setup->ifac, W8_DF_TOP, deep, rev);
+        if (ordered) {
+            w8_cplx_finalize_df_ordered(Ncvec, work, voutput, e);
+        } else {
+            w8_cplx_finalize_df(Ncvec, work, voutput, e);
+        }
+    } else {
+        if (ordered) {
+            w8_cplx_preprocess_df_ordered(Ncvec, vinput, work, e);
+        } else {
+            w8_cplx_preprocess_df(Ncvec, vinput, work, e);
+        }
+        cfftb1_df_ps(Ncvec, work, voutput, voutput, setup->twiddle, setup->ifac, W8_DF_TOP, deep, rev);
+    }
+}
+#endif
+
 W8_ENTRY(void)
 
 pffft_w8_transform(const PFFFT_Setup* setup, const float* input, float* output, float* work,
                    pffft_direction_t direction) {
+#if PFFFT_DEPTH_FIRST
+    if (setup->df_levels) {
+        pffft_w8_transform_complex_df(setup, input, output, (v4sf*)work, direction, 0);
+        W8_ZEROUPPER();
+        return;
+    }
+#endif
     pffft_w8_transform_internal(setup, input, output, (v4sf*)work, direction, 0);
     W8_ZEROUPPER();
 }
@@ -875,6 +987,13 @@ W8_ENTRY(void)
 
 pffft_w8_transform_ordered(const PFFFT_Setup* setup, const float* input, float* output, float* work,
                            pffft_direction_t direction) {
+#if PFFFT_DEPTH_FIRST
+    if (setup->df_levels) {
+        pffft_w8_transform_complex_df(setup, input, output, (v4sf*)work, direction, 1);
+        W8_ZEROUPPER();
+        return;
+    }
+#endif
     if (setup->transform == PFFFT_COMPLEX) {
         pffft_w8_transform_complex_ordered(setup, input, output, (v4sf*)work, direction);
     } else if (input == output && !(setup->ifac[1] & 1)) {
@@ -1052,7 +1171,7 @@ W8_ENTRY(int) pffft_w8_zconvolve_zp(const PFFFT_Setup* s, const float* x, const 
 /* setup                                                                  */
 
 /* requires pffft_wide_supports(N, transform); NULL only when an allocation fails */
-W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform) {
+W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform, int depth_first) {
     PFFFT_Setup* s;
     int k, m;
 #if !defined(PFFFT_WIDE_SEPARATE)
@@ -1066,13 +1185,40 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform) {
     s->transform = transform;
     s->kind = PFFFT_SETUP_KIND_W8;
     s->Ncvec = (transform == PFFFT_REAL ? N / 2 : N) / W8_SIMD_SZ;
-    s->data = pffft_aligned_malloc(2 * (size_t)s->Ncvec * sizeof(pffft_v8sf));
+    s->df_levels = 0;
+    k = 0; /* the entries of w8_df_rev */
+#if PFFFT_DEPTH_FIRST
+    /* as pffft_df_levels of the 4-lane code; "+ 1 >" for ">=": a limit of 0
+       compares an unsigned value with it */
+    if (transform == PFFFT_COMPLEX && depth_first != PFFFT_DF_OFF
+        && (depth_first == PFFFT_DF_ON
+            || (size_t)N * 2 * sizeof(float) + 1 > (size_t)(PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE))) {
+        int ifac[IFAC_MAX_SIZE];
+        cffti1_factors(N / W8_SIMD_SZ, ifac);
+        if (cfft_df_top(ifac, W8_DF_TOP)) {
+            s->df_levels = 1
+                           + cfft_df_deep(ifac, N / W8_SIMD_SZ / 16, W8_DF_TOP,
+                                          depth_first == PFFFT_DF_ON ? 0 : (size_t)(PFFFT_DEPTH_FIRST_LEAF_BYTES));
+            if (s->df_levels > 1) {
+                k = 1 << (2 * (s->df_levels - 1));
+            }
+        }
+    }
+#else
+    (void)depth_first;
+#endif
+    s->data = pffft_aligned_malloc(2 * (size_t)s->Ncvec * sizeof(pffft_v8sf) + (size_t)k * sizeof(int));
     if (!s->data) {
         free(s);
         return NULL;
     }
     s->e = (float*)s->data;
     s->twiddle = s->e + 2 * s->Ncvec * (W8_SIMD_SZ - 1);
+#if PFFFT_DEPTH_FIRST
+    if (k) {
+        cfft_df_rev(w8_df_rev(s), k);
+    }
+#endif
 
     for (k = 0; k < s->Ncvec; ++k) {
         int i = k / W8_SIMD_SZ;
@@ -1125,6 +1271,23 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform) {
 #undef terminal_radix8_plan
 #undef rffti1_ps
 #undef cffti1_ps
+#undef cffti1_factors
+#undef cfft_df_top
+#undef cfft_df_deep
+#undef cfft_df_rev
+#undef passb4_dit_body
+#undef passb4_dit_ip_ps
+#undef passb4_dit_op_ps
+#undef passb4_dit_ol_ps
+#undef cfft_df_leaf_ps
+#undef cfft_df_forward_ps
+#undef cfft_df_backward_ps
+#undef cfftf1_df_natural_ps
+#undef cfftb1_df_natural_ps
+#undef cfftf1_df_slices_ps
+#undef cfftb1_df_slices_ps
+#undef cfftf1_df_ps
+#undef cfftb1_df_ps
 #undef cfftf1_il_ps
 #undef cfftf1_tail_ps
 #undef cfftf1_tail_ol_ps

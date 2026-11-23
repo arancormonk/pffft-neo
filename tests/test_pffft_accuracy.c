@@ -15,7 +15,10 @@
   for PFFFT_REAL and PFFFT_COMPLEX, ordered and unordered, together with
   the identities the API documents: zreorder() round trips, in-place
   operation, work == NULL, the zconvolve family as circular convolution,
-  the zero-phase path, and the size helpers.
+  the zero-phase path, and the size helpers. Complex sizes whose plan
+  allows the depth-first pass schedule (PFFFT_DEPTH_FIRST) are checked
+  again with it, and it must give the forward results of the other
+  schedule bit for bit.
 
   Error criterion: the relative L2 error of a backward-stable FFT is
   O(eps * log2 N); a defect (wrong twiddle, layout, sign, scaling) shows
@@ -346,10 +349,14 @@ new_test_setup(int N, int cplx) {
     pffft_transform_t tt = cplx ? PFFFT_COMPLEX : PFFFT_REAL;
     PFFFT_Setup* s = pffft_internal_new_setup(N, tt, g_backend);
     if (s) {
+        const int backend = g_backend & ~(PFFFT_BACKEND_DEPTH_FIRST | PFFFT_BACKEND_BREADTH_FIRST);
         const int lanes = pffft_setup_simd_size(s);
-        if ((g_backend == PFFFT_BACKEND_NATIVE && lanes != pffft_simd_size())
-            || (g_backend == PFFFT_BACKEND_W8 && lanes != 8)) {
+        if ((backend == PFFFT_BACKEND_NATIVE && lanes != pffft_simd_size())
+            || (backend == PFFFT_BACKEND_W8 && lanes != 8)) {
             report_failure("setup uses an unexpected backend", N, cplx, (double)lanes);
+        }
+        if ((g_backend & PFFFT_BACKEND_BREADTH_FIRST) && pffft_internal_depth_first_levels(s)) {
+            report_failure("breadth-first setup is depth first", N, cplx, 1);
         }
     }
     return s;
@@ -732,6 +739,67 @@ test_size_helpers(void) {
     }
 }
 
+/* The depth-first schedule of the complex transform of N on 'backend'
+   (PFFFT_BACKEND_NATIVE or _W8): forced, with the smallest leaves, or as
+   pffft_new_setup() schedules the size, which is depth first from a size
+   of pffft_pass_config.h on. The checks of test_size(), and the forward
+   spectra must have the bits of the breadth-first schedule's. Returns 1
+   if the setup is depth first, else 0 without a check. */
+static int
+test_depth_first_size(int backend, int N, int forced) {
+    const int flags = backend | (forced ? PFFFT_BACKEND_DEPTH_FIRST : 0);
+    PFFFT_Setup* df = pffft_internal_new_setup(N, PFFFT_COMPLEX, flags);
+    PFFFT_Setup* bf;
+    if (!df || !pffft_internal_depth_first_levels(df)) {
+        pffft_destroy_setup(df);
+        return 0;
+    }
+    bf = pffft_internal_new_setup(N, PFFFT_COMPLEX, backend | PFFFT_BACKEND_BREADTH_FIRST);
+    if (!bf || pffft_internal_depth_first_levels(bf)) {
+        report_failure("no breadth-first setup for a depth-first size", N, 1, 1);
+    } else {
+        float *x = alloc_buf(2 * N), *work = alloc_buf(2 * N);
+        float *y = alloc_buf(2 * N), *z = alloc_buf(2 * N);
+        int k, ord;
+        for (k = 0; k < 2 * N; ++k) {
+            x[k] = (float)urand();
+        }
+        for (ord = 0; ord < 2; ++ord) {
+            transform_fn fn = ord ? pffft_transform_ordered : pffft_transform;
+            fn(df, x, y, work, PFFFT_FORWARD);
+            fn(bf, x, z, work, PFFFT_FORWARD);
+            if (!same_bits(y, z, 2 * N)) {
+                report_failure(ord ? "depth-first transform_ordered != breadth-first (forward)"
+                                   : "depth-first transform != breadth-first (forward)",
+                               N, 1, 1);
+            }
+        }
+        pffft_aligned_free(x);
+        pffft_aligned_free(work);
+        pffft_aligned_free(y);
+        pffft_aligned_free(z);
+    }
+    pffft_destroy_setup(bf);
+    pffft_destroy_setup(df);
+    g_backend = flags;
+    test_size(N, 1);
+    g_backend = PFFFT_BACKEND_AUTO;
+    return 1;
+}
+
+/* every complex size up to max_n whose plan allows the depth-first
+   schedule, forced; returns their number */
+static int
+test_depth_first(int backend, int nmin, int max_n) {
+    int N, tested = 0;
+    for (N = nmin; N <= max_n; N += nmin) {
+        if (is_smooth(N / nmin)) {
+            tested += test_depth_first_size(backend, N, 1);
+        }
+    }
+    return tested;
+}
+
 static int
 test_reference(void) {
     /* the reference must agree with the defining O(N^2) sum */
@@ -793,6 +861,17 @@ main(int argc, char** argv) {
     printf("worst rel. L2 error in eps*log2(N): forward %.3f, backward %.3f, convolution %.3f (limit %.1f)\n",
            worst_fwd, worst_bwd, worst_conv, TOL_FFT);
 
+    /* the depth-first schedule: none where the build has it off, or
+     without lanes; pffft_new_setup() uses it for larger sizes than the
+     default max_N with these lanes */
+    worst_fwd = worst_bwd = worst_conv = 0;
+    N = test_depth_first(PFFFT_BACKEND_NATIVE, pffft_min_fft_size(PFFFT_COMPLEX), max_n);
+    printf("depth-first schedule: tested %d COMPLEX sizes\n", N);
+    if (N) {
+        printf("worst rel. L2 error in eps*log2(N): forward %.3f, backward %.3f, convolution %.3f (limit %.1f)\n",
+               worst_fwd, worst_bwd, worst_conv, TOL_FFT);
+    }
+
     /* the 8-lane backend, where the build and the CPU have it: N must be a
      multiple of 64 (complex) or 128 (real) with N/8 = 2^a 3^b 5^c */
     {
@@ -815,6 +894,21 @@ main(int argc, char** argv) {
             printf("8-lane backend: tested %d REAL and %d COMPLEX sizes\n", wide_counts[0], wide_counts[1]);
             printf("worst rel. L2 error in eps*log2(N): forward %.3f, backward %.3f, convolution %.3f (limit %.1f)\n",
                    worst_fwd, worst_bwd, worst_conv, TOL_FFT);
+            {
+                /* with 8 lanes pffft_new_setup() schedules these two depth
+                 first, one with slices that are leaves and one deeper */
+                static const int auto_sizes[] = {16384, 65536};
+                worst_fwd = worst_bwd = worst_conv = 0;
+                N = test_depth_first(PFFFT_BACKEND_W8, 64, max_n);
+                N += test_depth_first_size(PFFFT_BACKEND_W8, auto_sizes[0], 0);
+                N += test_depth_first_size(PFFFT_BACKEND_W8, auto_sizes[1], 0);
+                printf("8-lane backend, depth-first schedule: tested %d COMPLEX sizes\n", N);
+                if (N) {
+                    printf("worst rel. L2 error in eps*log2(N): forward %.3f, backward %.3f, convolution %.3f (limit "
+                           "%.1f)\n",
+                           worst_fwd, worst_bwd, worst_conv, TOL_FFT);
+                }
+            }
         } else {
             printf("8-lane backend: not available in this build or on this CPU\n");
         }

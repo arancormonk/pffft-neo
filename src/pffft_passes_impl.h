@@ -69,9 +69,10 @@
 
    The including file sets PF_INPLACE_CODELETS to 0 or 1, as it sets
    PF_FUSED_LAYOUT. With 0 the file compiles everything. With
-   PFFFT_INPLACE_FIRST_PASS and the fused layout, that inclusion includes
-   the file once more, with PF_INPLACE_CODELETS 1, and sets it back to 0
-   afterwards. The inclusion with 1 compiles only the eight complex
+   PFFFT_INPLACE_FIRST_PASS or PFFFT_DEPTH_FIRST and the fused layout,
+   that inclusion includes the file once more, with PF_INPLACE_CODELETS 1,
+   and sets it back to 0 afterwards. The inclusion with 1 compiles only
+   the eight complex
    codelets passf2/3/4/5_ps and passf2/3/4/5_il_ps, a second time, as the
    always-inline bodies passf2_body, ..., passf5_il_body without
    'restrict', for the in-place first-pass wrappers (passf2_ip_ps, ...,
@@ -1377,6 +1378,21 @@ rffti1_ps(int n, float* wa, int* ifac) {
     }
 } /* rffti1 */
 
+/* the factors of the complex plan of n, as cffti1_ps stores them in ifac;
+   returns their number */
+static int
+cffti1_factors(int n, int* ifac) {
+#if PFFFT_TERMINAL_RADIX8
+    static const int ntryh[] = {5, 3, 4, 2, 0};
+    decompose(n, ifac, ntryh);
+    return terminal_radix8_plan(ifac);
+#else
+    static const int ntryh_large[] = {5, 3, 8, 4, 2, 0};
+    static const int ntryh_default[] = {5, 3, 4, 2, 0};
+    return decompose(n, ifac, (n == 8) ? ntryh_large : ntryh_default);
+#endif
+}
+
 static void
 cffti1_ps(int n, float* wa, int* ifac) {
     /* Radix 8 is used only as the pass with one element per leg, the last
@@ -1402,21 +1418,8 @@ cffti1_ps(int n, float* wa, int* ifac) {
      PFFFT_TERMINAL_RADIX8 == 1: the default try-list for every n, then
      terminal_radix8_plan: a list 2, ..., 4 becomes ..., 8 (n == 8 still
      gives the single pass 8), which saves one sweep over the data. */
-#if PFFFT_TERMINAL_RADIX8
-    static const int ntryh[] = {5, 3, 4, 2, 0};
     int k1, j, ii;
-
-    int nf;
-    decompose(n, ifac, ntryh);
-    nf = terminal_radix8_plan(ifac);
-#else
-    static const int ntryh_large[] = {5, 3, 8, 4, 2, 0};
-    static const int ntryh_default[] = {5, 3, 4, 2, 0};
-    const int* ntryh = (n == 8) ? ntryh_large : ntryh_default;
-    int k1, j, ii;
-
-    int nf = decompose(n, ifac, ntryh);
-#endif
+    int nf = cffti1_factors(n, ifac);
 
     int i = 1;
     int l1 = 1;
@@ -1790,7 +1793,7 @@ static NEVER_INLINE(void) passf8_ol_ps(int l1, const v4sf* cc, v4sf* out, float 
 }
 #endif /* PFFFT_TERMINAL_RADIX8 */
 
-#if PFFFT_INPLACE_FIRST_PASS
+#if PFFFT_INPLACE_FIRST_PASS || PFFFT_DEPTH_FIRST
 /*
   The first complex pass in place. In the first pass (l1 == 1) each
   butterfly reads the element pair at position i of every leg and writes
@@ -1828,6 +1831,15 @@ static NEVER_INLINE(void) passf8_ol_ps(int l1, const v4sf* cc, v4sf* out, float 
 #undef PF_INPLACE_CODELETS
 #define PF_INPLACE_CODELETS 0
 
+/* the depth-first passes use the radix-4 one only, and take their input
+   from another buffer */
+static NEVER_INLINE(void)
+    passf4_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, const float* wa3, float fsign) {
+    assert(ido > 2);
+    passf4_body(ido, 1, c, c, wa1, wa2, wa3, fsign);
+}
+
+#if PFFFT_INPLACE_FIRST_PASS
 static NEVER_INLINE(void) passf2_ip_ps(int ido, v4sf* c, const float* wa1, float fsign) {
     assert(ido > 2); /* see above: one element per leg is not safe in place */
     passf2_body(ido, 1, c, c, wa1, fsign);
@@ -1836,12 +1848,6 @@ static NEVER_INLINE(void) passf2_ip_ps(int ido, v4sf* c, const float* wa1, float
 static NEVER_INLINE(void) passf3_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, float fsign) {
     assert(ido > 2);
     passf3_body(ido, 1, c, c, wa1, wa2, fsign);
-}
-
-static NEVER_INLINE(void)
-    passf4_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, const float* wa3, float fsign) {
-    assert(ido > 2);
-    passf4_body(ido, 1, c, c, wa1, wa2, wa3, fsign);
 }
 
 static NEVER_INLINE(void) passf5_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, const float* wa3,
@@ -1868,6 +1874,7 @@ static NEVER_INLINE(void) passf5_il_ip_ps(int ido, v4sf* c, const float* wa1, co
     passf5_il_body(ido, c, c, wa1, wa2, wa3, wa4, fsign);
 }
 #endif /* PFFFT_INPLACE_FIRST_PASS */
+#endif /* PFFFT_INPLACE_FIRST_PASS || PFFFT_DEPTH_FIRST */
 
 /* the passes of cfftf1_ps from factor index k1 on, l1 and iw as cfftf1_ps
    has them there; 'in' holds the data and 'out' is the other buffer. With
@@ -2026,6 +2033,381 @@ cfftf1_il_ps(int n, const v4sf* input, v4sf* work1, v4sf* work2, const float* wa
     }
     return cfftf1_tail_ps(n, work2, work1, 2, 1, 0, wa, ifac, isign);
 }
+
+#if PFFFT_DEPTH_FIRST
+/*
+  Depth-first complex transforms.
+
+  The passes above sweep the whole buffer once each, and every pass writes
+  the buffer that the next one reads: beyond the size of a cache level, each
+  pass moves all the data through that level again. The functions below run
+  the leading radix-4 passes of a plan in another order.
+
+  forward   A radix-4 pass over a group of 4*ido elements leaves four
+            independent sub-transforms in its four legs. In place (the
+            codelets of the in-place first pass above), leg j stays where
+            it was, so the pass can be followed by all the remaining passes
+            of leg 0, then by those of leg 1, and so on: depth first. A
+            sub-transform is finished while it is in the cache. The last
+            passes of a sub-transform, its leaf, are the passes above,
+            between the leaf and scratch of its size; they leave the leaf
+            in natural order.
+  backward  The same tree from the leaves up: the leaves first, then the
+            radix-4 passes as decimation-in-time passes (passb4_dit_*
+            below), which multiply by the twiddles before the butterfly
+            where the passes above do it after; the last one interleaves
+            the result. These are other operations than the passes above
+            perform: the results differ in the last bits. Forward, the
+            operations and their operands are the same, and so are the
+            results.
+
+  Bins. A forward in-place pass leaves in leg j the bins that are j modulo
+  4. After 'levels' of them a buffer of n elements holds 4^levels regions
+  of n / 4^levels elements each: region
+  J = c1 4^(levels-1) + c2 4^(levels-2) + ... + c_levels holds, in natural
+  order of q, the bins c1 + 4 c2 + ... + 4^(levels-1) c_levels + 4^levels q:
+  J is that residue with its base-4 digits reversed. The backward passes
+  take the bins in the same places.
+
+  The spectrum keeps its layout, in two steps:
+
+  streams   The steps that combine the lanes (finalize, preprocess) work
+            on blocks of as many consecutive bins as there are lanes. After
+            'top' passes, 1 with 4 lanes and 2 with 8, these bins are one
+            element of each of 4 (8) regions, the same element of each: a
+            block is read from, or written to, streams that advance
+            together, with the regions, called slices here, in natural
+            order. Finalize and preprocess have a variant for that.
+  slices    A slice larger than a leaf continues depth first with 'deep'
+            more passes, in scratch, and is brought back into natural
+            order when it is done (cfftf1_df_natural_ps): the elements of its
+            regions, each a leaf in natural order, are interleaved, while
+            they are still in the cache for all but the largest
+            transforms. This is the one step the other schedule does not
+            have; it moves the data once more, without arithmetic.
+*/
+
+/* Whether the plan in ifac of a transform runs its first 'top' passes
+   depth first (top: 1 with 4 lanes, 2 with 8, see above): they have to be
+   radix-4 passes, and two more passes make the smallest leaf. */
+static int
+cfft_df_top(const int* ifac, int top) {
+    int k;
+    if (ifac[1] < top + 2) {
+        return 0;
+    }
+    for (k = 0; k < top; ++k) {
+        if (ifac[2 + k] != 4) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* The number of passes after the first 'top' that run depth first within
+   a slice of n elements: radix-4 passes, as many as it takes to make a
+   leaf of at most leaf_bytes bytes while two passes remain for the leaf.
+   0: the slice is a leaf. */
+static int
+cfft_df_deep(const int* ifac, int n, int top, size_t leaf_bytes) {
+    const size_t leaf_max = leaf_bytes / (2 * sizeof(v4sf));
+    const int nf = ifac[1];
+    int deep = 0;
+    while (top + deep < nf - 2 && ifac[2 + top + deep] == 4 && (size_t)n > leaf_max) {
+        ++deep;
+        n /= 4;
+    }
+    return deep;
+}
+
+/* rev[J] for J < regions, a power of 4: J with its base-4 digits reversed */
+static void
+cfft_df_rev(int* rev, int regions) {
+    int J;
+    for (J = 0; J < regions; ++J) {
+        int r = 0, v = J, m;
+        for (m = regions; m > 1; m /= 4) {
+            r = 4 * r + v % 4;
+            v /= 4;
+        }
+        rev[J] = r;
+    }
+}
+
+/*
+  passb4_dit: the radix-4 decimation-in-time pass of the backward transform
+  over one group (l1 == 1): legs 1, 2, 3 times their twiddles, then the
+  butterfly of passf4 with fsign = +1. Every leg is loaded before the first
+  store and position i of the legs is all a butterfly reads and writes, so
+  cc and ch may be the same buffer. With 'interleave' the result is stored
+  as interleaved complex data.
+*/
+static ALWAYS_INLINE(void) passb4_dit_body(int ido, const v4sf* cc, v4sf* ch, const float* wa1, const float* wa2,
+                                           const float* wa3, const int interleave) {
+    int i;
+    for (i = 0; i < ido - 1; i += 2) {
+        v4sf c0r = VLD(cc, i), c0i = VLD(cc, i + 1);
+        v4sf c1r = VLD(cc, i + ido), c1i = VLD(cc, i + ido + 1);
+        v4sf c2r = VLD(cc, i + 2 * ido), c2i = VLD(cc, i + 2 * ido + 1);
+        v4sf c3r = VLD(cc, i + 3 * ido), c3i = VLD(cc, i + 3 * ido + 1);
+        v4sf tr1, tr2, tr3, tr4, ti1, ti2, ti3, ti4;
+        v4sf y0r, y0i, y1r, y1i, y2r, y2i, y3r, y3i;
+        VCPLXMUL(c1r, c1i, LD_PS1(wa1[i]), LD_PS1(wa1[i + 1]));
+        VCPLXMUL(c2r, c2i, LD_PS1(wa2[i]), LD_PS1(wa2[i + 1]));
+        VCPLXMUL(c3r, c3i, LD_PS1(wa3[i]), LD_PS1(wa3[i + 1]));
+        tr1 = VSUB(c0r, c2r);
+        tr2 = VADD(c0r, c2r);
+        ti1 = VSUB(c0i, c2i);
+        ti2 = VADD(c0i, c2i);
+        ti4 = VSUB(c1r, c3r);
+        tr4 = VSUB(c3i, c1i);
+        tr3 = VADD(c1r, c3r);
+        ti3 = VADD(c1i, c3i);
+        y0r = VADD(tr2, tr3);
+        y0i = VADD(ti2, ti3);
+        y1r = VADD(tr1, tr4);
+        y1i = VADD(ti1, ti4);
+        y2r = VSUB(tr2, tr3);
+        y2i = VSUB(ti2, ti3);
+        y3r = VSUB(tr1, tr4);
+        y3i = VSUB(ti1, ti4);
+        if (interleave) {
+            PF_INTERLEAVE2_ST(y0r, y0i, ch, i, i + 1);
+            PF_INTERLEAVE2_ST(y1r, y1i, ch, i + ido, i + ido + 1);
+            PF_INTERLEAVE2_ST(y2r, y2i, ch, i + 2 * ido, i + 2 * ido + 1);
+            PF_INTERLEAVE2_ST(y3r, y3i, ch, i + 3 * ido, i + 3 * ido + 1);
+        } else {
+            VST(ch, i, y0r);
+            VST(ch, i + 1, y0i);
+            VST(ch, i + ido, y1r);
+            VST(ch, i + ido + 1, y1i);
+            VST(ch, i + 2 * ido, y2r);
+            VST(ch, i + 2 * ido + 1, y2i);
+            VST(ch, i + 3 * ido, y3r);
+            VST(ch, i + 3 * ido + 1, y3i);
+        }
+    }
+}
+
+/* in place */
+static NEVER_INLINE(void) passb4_dit_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, const float* wa3) {
+    passb4_dit_body(ido, c, c, wa1, wa2, wa3, 0);
+}
+
+/* from cc to ch */
+static NEVER_INLINE(void)
+    passb4_dit_op_ps(int ido, const v4sf* cc, v4sf* ch, const float* wa1, const float* wa2, const float* wa3) {
+    passb4_dit_body(ido, cc, ch, wa1, wa2, wa3, 0);
+}
+
+/* from cc to out, interleaved */
+static NEVER_INLINE(void)
+    passb4_dit_ol_ps(int ido, const v4sf* cc, v4sf* out, const float* wa1, const float* wa2, const float* wa3) {
+    passb4_dit_body(ido, cc, out, wa1, wa2, wa3, 1);
+}
+
+/* A leaf: the passes from factor index k1 on of the sub-transform of n
+   elements in x, iw as cfftf1_ps has it there, left in x in natural order.
+   tmp is scratch for 2*n vectors. The passes alternate between x and tmp,
+   so an odd number of them starts with one in place: a radix-4 pass, as a
+   plan that starts with radix-4 passes has no other factor before its
+   last one (cffti1_factors). */
+static void
+cfft_df_leaf_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa, const int* ifac, int isign) {
+    const v4sf* result;
+    if ((ifac[1] + 2 - k1) & 1) {
+        const int idot = 2 * (n / 4);
+        assert(ifac[k1] == 4);
+        passf4_ip_ps(idot, x, &wa[iw], &wa[iw + idot], &wa[iw + 2 * idot], (float)isign);
+        result = cfftf1_tail_ps(n, x, tmp, k1 + 1, 4, iw + 3 * idot, wa, ifac, isign);
+    } else {
+        result = cfftf1_tail_ps(n, x, tmp, k1, 1, iw, wa, ifac, isign);
+    }
+    assert(result == x);
+    (void)result; /* otherwise unused when assertions are disabled */
+}
+
+/* Forward: the passes from factor index k1 on of the sub-transform of n
+   elements in x, the next 'levels' of them radix-4 passes in place, then
+   the leaves, each with tmp as its scratch: x is left with the bins of
+   4^levels regions as described above. Depth first without recursion: the
+   leaves in sequence, each after the passes of the groups that begin with
+   it, the largest group first. */
+static NEVER_INLINE(void)
+    cfft_df_forward_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa, const int* ifac, int levels) {
+    const int leaves = 1 << (2 * levels), nleaf = n / leaves;
+    int leaf, level;
+    for (leaf = 0; leaf < leaves; ++leaf, x += 2 * nleaf) {
+        int idot = 2 * (n / 4), w = iw; /* a leg of the group of a level, and its twiddles */
+        for (level = 0; level < levels; ++level, w += 3 * idot, idot /= 4) {
+            if (leaf % (leaves >> (2 * level)) == 0) {
+                passf4_ip_ps(idot, x, &wa[w], &wa[w + idot], &wa[w + 2 * idot], -1.f);
+            }
+        }
+        cfft_df_leaf_ps(nleaf, x, tmp, k1 + levels, w, wa, ifac, -1);
+    }
+}
+
+/* Backward: as cfft_df_forward_ps, x holding the bins of the regions: each
+   leaf, then the passes of the groups that end with it, the smallest group
+   first. */
+static NEVER_INLINE(void)
+    cfft_df_backward_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa, const int* ifac, int levels) {
+    const int leaves = 1 << (2 * levels), nleaf = n / leaves;
+    int leaf, level, w_leaf = iw;
+    for (level = 0; level < levels; ++level) {
+        w_leaf += 3 * (2 * (n >> (2 * level + 2)));
+    }
+    for (leaf = 0; leaf < leaves; ++leaf) {
+        int idot = 2 * nleaf, w = w_leaf; /* a leg of the group of a level, and its twiddles */
+        cfft_df_leaf_ps(nleaf, x + 2 * leaf * nleaf, tmp, k1 + levels, w_leaf, wa, ifac, +1);
+        for (level = levels - 1; level >= 0; --level, idot *= 4) {
+            const int group = leaves >> (2 * level); /* its leaves */
+            w -= 3 * idot;
+            if ((leaf + 1) % group == 0) {
+                passb4_dit_ip_ps(idot, x + 2 * (leaf + 1 - group) * nleaf, &wa[w], &wa[w + idot], &wa[w + 2 * idot]);
+            }
+        }
+    }
+}
+
+/* Forward: the passes from factor index k1 on of the sub-transform of n
+   elements in x, the first 'deep' of them depth first, left in x in
+   natural order. deep > 0: the first pass moves x to tmp, where the rest
+   runs; then region rev[c] of tmp, a leaf in natural order, holds the
+   bins c + 4^deep q, which go back to x. rev: cfft_df_rev for 4^deep
+   regions. tmp is scratch for 2 * n vectors and for a leaf's. */
+static NEVER_INLINE(void) cfftf1_df_natural_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa,
+                                               const int* ifac, int deep, const int* rev) {
+    if (deep > 0) {
+        const int idot = 2 * (n / 4), regions = 1 << (2 * deep), nleaf = n / regions;
+        const int tile = regions < (PFFFT_DEPTH_FIRST_TILE) ? regions : (PFFFT_DEPTH_FIRST_TILE);
+        v4sf* leaf_tmp = tmp + 2 * n;
+        int j, q, c, c0;
+        passf4_ps(idot, 1, x, tmp, &wa[iw], &wa[iw + idot], &wa[iw + 2 * idot], -1.f);
+        for (j = 0; j < 4; ++j) {
+            cfft_df_forward_ps(n / 4, tmp + j * idot, leaf_tmp, k1 + 1, iw + 3 * idot, wa, ifac, deep - 1);
+        }
+        /* a tile of regions at a time: see PFFFT_DEPTH_FIRST_TILE */
+        for (c0 = 0; c0 < regions; c0 += tile) {
+            for (q = 0; q < nleaf; ++q) {
+                v4sf* to = x + 2 * (c0 + regions * q);
+                for (c = c0; c < c0 + tile; ++c, to += 2) {
+                    const v4sf* from = tmp + 2 * (rev[c] * nleaf + q);
+                    VST(to, 0, VLD(from, 0));
+                    VST(to, 1, VLD(from, 1));
+                }
+            }
+        }
+    } else {
+        cfft_df_leaf_ps(n, x, tmp, k1, iw, wa, ifac, -1);
+    }
+}
+
+/* Backward: the inverse of cfftf1_df_natural_ps. x holds the bins
+   in natural order and is left with the sub-transform's result in natural
+   order. deep > 0: the bins go to their regions in tmp, and the last pass
+   moves the result back to x. */
+static NEVER_INLINE(void) cfftb1_df_natural_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa,
+                                               const int* ifac, int deep, const int* rev) {
+    if (deep > 0) {
+        const int idot = 2 * (n / 4), regions = 1 << (2 * deep), nleaf = n / regions;
+        const int tile = regions < (PFFFT_DEPTH_FIRST_TILE) ? regions : (PFFFT_DEPTH_FIRST_TILE);
+        v4sf* leaf_tmp = tmp + 2 * n;
+        int j, q, c, c0;
+        for (c0 = 0; c0 < regions; c0 += tile) {
+            for (q = 0; q < nleaf; ++q) {
+                const v4sf* from = x + 2 * (c0 + regions * q);
+                for (c = c0; c < c0 + tile; ++c, from += 2) {
+                    v4sf* to = tmp + 2 * (rev[c] * nleaf + q);
+                    VST(to, 0, VLD(from, 0));
+                    VST(to, 1, VLD(from, 1));
+                }
+            }
+        }
+        for (j = 0; j < 4; ++j) {
+            cfft_df_backward_ps(n / 4, tmp + j * idot, leaf_tmp, k1 + 1, iw + 3 * idot, wa, ifac, deep - 1);
+        }
+        passb4_dit_op_ps(idot, tmp, x, &wa[iw], &wa[iw + idot], &wa[iw + 2 * idot]);
+    } else {
+        cfft_df_leaf_ps(n, x, tmp, k1, iw, wa, ifac, +1);
+    }
+}
+
+/* Forward: the passes from factor index k1 on of the sub-transform of n
+   elements in x: the next 'top' of them radix-4 passes in place, which
+   leave 4^top slices, each then brought to natural order. The order of
+   cfft_df_forward_ps. */
+static NEVER_INLINE(void) cfftf1_df_slices_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa,
+                                              const int* ifac, int top, int deep, const int* rev) {
+    const int slices = 1 << (2 * top), nslice = n / slices;
+    int slice, level;
+    for (slice = 0; slice < slices; ++slice, x += 2 * nslice) {
+        int idot = 2 * (n / 4), w = iw;
+        for (level = 0; level < top; ++level, w += 3 * idot, idot /= 4) {
+            if (slice % (slices >> (2 * level)) == 0) {
+                passf4_ip_ps(idot, x, &wa[w], &wa[w + idot], &wa[w + 2 * idot], -1.f);
+            }
+        }
+        cfftf1_df_natural_ps(nslice, x, tmp, k1 + top, w, wa, ifac, deep, rev);
+    }
+}
+
+/* Backward: as cfftf1_df_slices_ps, the slices before the passes; the
+   order of cfft_df_backward_ps. */
+static NEVER_INLINE(void) cfftb1_df_slices_ps(int n, v4sf* x, v4sf* tmp, int k1, int iw, const float* wa,
+                                              const int* ifac, int top, int deep, const int* rev) {
+    const int slices = 1 << (2 * top), nslice = n / slices;
+    int slice, level, w_slice = iw;
+    for (level = 0; level < top; ++level) {
+        w_slice += 3 * (2 * (n >> (2 * level + 2)));
+    }
+    for (slice = 0; slice < slices; ++slice) {
+        int idot = 2 * nslice, w = w_slice;
+        cfftb1_df_natural_ps(nslice, x + 2 * slice * nslice, tmp, k1 + top, w_slice, wa, ifac, deep, rev);
+        for (level = top - 1; level >= 0; --level, idot *= 4) {
+            const int group = slices >> (2 * level); /* its slices */
+            w -= 3 * idot;
+            if ((slice + 1) % group == 0) {
+                passb4_dit_ip_ps(idot, x + 2 * (slice + 1 - group) * nslice, &wa[w], &wa[w + idot], &wa[w + 2 * idot]);
+            }
+        }
+    }
+}
+
+/* The passes of a forward transform of n interleaved elements in 'input',
+   depth first: the result is in x, not input, as 4^top slices in natural
+   order (see above). tmp is scratch for a slice and a leaf, 2 * n / 4^top
+   and 2 * n / 4^(top + deep) vectors, and not x; it may be part of input,
+   as the first pass has read the input before a slice uses it. */
+static void
+cfftf1_df_ps(int n, const v4sf* input, v4sf* x, v4sf* tmp, const float* wa, const int* ifac, int top, int deep,
+             const int* rev) {
+    const int idot = 2 * (n / 4);
+    int j;
+    assert(top >= 1 && ifac[2] == 4 && x != tmp && x != input);
+    passf4_il_ps(idot, input, x, &wa[0], &wa[idot], &wa[2 * idot], -1.f);
+    for (j = 0; j < 4; ++j) {
+        cfftf1_df_slices_ps(n / 4, x + j * idot, tmp, 3, 3 * idot, wa, ifac, top - 1, deep, rev);
+    }
+}
+
+/* The passes of a backward transform of the n bins in x (as cfftf1_df_ps
+   leaves them), depth first, interleaved into out, not x; x is
+   overwritten. tmp as for cfftf1_df_ps; it may be part of out, which the
+   last pass alone stores to. */
+static void
+cfftb1_df_ps(int n, v4sf* x, v4sf* out, v4sf* tmp, const float* wa, const int* ifac, int top, int deep,
+             const int* rev) {
+    const int idot = 2 * (n / 4);
+    int j;
+    assert(top >= 1 && ifac[2] == 4 && x != tmp && x != out);
+    for (j = 0; j < 4; ++j) {
+        cfftb1_df_slices_ps(n / 4, x + j * idot, tmp, 3, 3 * idot, wa, ifac, top - 1, deep, rev);
+    }
+    passb4_dit_ol_ps(idot, x, out, &wa[0], &wa[idot], &wa[2 * idot]);
+}
+#endif /* PFFFT_DEPTH_FIRST */
 
 #undef PF_INTERLEAVE2_ST
 #undef PF_UNINTERLEAVE2_ST
