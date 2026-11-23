@@ -1388,6 +1388,8 @@ PFFFT_EXPORT int
 FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
     int numErrs = 0;
 
+    /* Seed the destinations with nonzero, distinct lane values so a partial
+       write is visible when zeroing a vector or broadcasting a scalar. */
     {
         v4sf_union C;
         int k;
@@ -1439,6 +1441,8 @@ FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
             a[k] = k + 1;
         }
 
+        /* Sliding a four-float window by one element exercises both loads
+           regardless of where the compiler placed the array on the stack. */
         for (k = 0; k + 3 < 16; ++k) {
             const float* ptr = &a[k];
             if (DbgOut) {
@@ -1492,6 +1496,8 @@ FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
             fprintf(DbgOut, "  Inp B:  %f, %f, %f, %f\n", B.f[0], B.f[1], B.f[2], B.f[3]);
             fprintf(DbgOut, "}\n");
         }
+        /* Distinct operands expose lane mix-ups. Check the inputs after each
+           arithmetic macro as well, since a macro could overwrite an argument. */
         C.v = VADD(A.v, B.v);
         if (DbgOut) {
             fprintf(DbgOut, "C = VADD(A,B) => {\n");
@@ -1621,6 +1627,8 @@ FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
             fprintf(DbgOut, "  Inp C:  %f, %f, %f, %f\n", C.f[0], C.f[1], C.f[2], C.f[3]);
             fprintf(DbgOut, "}\n");
         }
+        /* VMSUB subtracts the product from C. VMSUBR below reverses that
+           subtraction, so the two checks expect opposite signs. */
         D.v = VMSUB(A.v, B.v, C.v);
         if (DbgOut) {
             fprintf(DbgOut, "D = VMSUB(A,B,C) => {\n");
@@ -1739,6 +1747,8 @@ FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
             fprintf(DbgOut, "  Inp B:  %f, %f, %f, %f\n", B.f[0], B.f[1], B.f[2], B.f[3]);
             fprintf(DbgOut, "}\n");
         }
+        /* Each input occupies its own range so every output identifies
+           both its source vector and its original lane. */
         INTERLEAVE2(A.v, B.v, C.v, D.v);
         if (DbgOut) {
             fprintf(DbgOut, "INTERLEAVE2(A,B, => C,D) => {\n");
@@ -1871,6 +1881,8 @@ FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
             fprintf(DbgOut, "  Inp A:  %f, %f, %f, %f\n", A.f[0], A.f[1], A.f[2], A.f[3]);
             fprintf(DbgOut, "}\n");
         }
+        /* Scalar reversal moves individual lanes. Complex reversal below
+           moves pairs while preserving real/imaginary order within each pair. */
         C.v = VREV_S(A.v);
         if (DbgOut) {
             fprintf(DbgOut, "C = VREV_S(A) => {\n");

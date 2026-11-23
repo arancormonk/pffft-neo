@@ -56,11 +56,11 @@ typedef struct {
 
 static cld*
 alloc_reference(int n) {
-    if (n <= 0 || (size_t)n > SIZE_MAX / sizeof(cld)) {
+    if (n <= 0) {
         fputs("Invalid reference buffer size\n", stderr);
         exit(EXIT_FAILURE);
     }
-    cld* buffer = malloc(sizeof(*buffer) * (size_t)n);
+    cld* buffer = calloc((size_t)n, sizeof(*buffer));
     if (!buffer) {
         fputs("Could not allocate reference buffer\n", stderr);
         exit(EXIT_FAILURE);
@@ -641,6 +641,7 @@ test_size_helpers(void) {
         if (nmin != (cplx ? simd * simd : 2 * simd * simd)) {
             report_failure("min_fft_size", nmin, cplx, 1);
         }
+        /* Once the SIMD lane factor is removed, only factors of 2, 3 and 5 are allowed. */
         for (N = -3; N <= 20000; ++N) {
             const int valid = N > 0 && N % nmin == 0 && is_smooth(N / nmin);
             if (pffft_is_valid_size(N, tt) != valid) {
@@ -657,6 +658,7 @@ test_size_helpers(void) {
                 }
             }
             if (N >= 1 && N <= 4096) {
+                /* Search both ways one size at a time for an independent nearest-size reference. */
                 int hi = N, lo = N;
                 while (!(hi % nmin == 0 && is_smooth(hi / nmin))) {
                     ++hi;
@@ -723,6 +725,7 @@ test_size_helpers(void) {
     if (pffft_is_power_of_two(INT_MIN)) {
         report_failure("is_power_of_two", INT_MIN, 0, 1);
     }
+    /* Repeated doubling gives the expected ceiling, including exact powers of two. */
     for (N = 1; N <= (1 << 20); ++N) {
         int p = 1;
         while (p < N) {

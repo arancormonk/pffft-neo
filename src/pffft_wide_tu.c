@@ -17,7 +17,7 @@
 #error "pffft_wide_tu.c must be compiled with /arch:AVX2"
 #endif
 #define PFFFT_WIDE_TU_PART 1
-#include "pffft.c"
+#include "pffft_impl.h"
 #else
 typedef int pffft_wide_tu_unused; /* ISO C: a translation unit is not empty */
 #endif

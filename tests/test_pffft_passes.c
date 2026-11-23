@@ -8,7 +8,7 @@
   (src/pffft_passes_impl.h), and of the compile-time switches of
   src/pffft_pass_config.h.
 
-  This file includes pffft.c to call its static functions. CMake compiles it
+  This file includes pffft_impl.h to call the static kernels. CMake compiles it
   with the PFFFT target's definitions, options and include directories and
   does not link the library.
 
@@ -44,22 +44,27 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 1 for a switch of pffft_pass_config.h that the build defines (compiler
-   flags or definitions supplied by a parent project),
-   0 for one that gets its default from the header; test_config() checks
-   the default of the latter only */
-#ifdef PFFFT_TERMINAL_RADIX8
-#define T_BUILD_TERMINAL_RADIX8 1
-#else
-#define T_BUILD_TERMINAL_RADIX8 0
+/* Record which switches use the defaults before the implementation sets them. */
+#ifndef PFFFT_TERMINAL_RADIX8
+#define T_DEFAULT_TERMINAL_RADIX8
 #endif
-#ifdef PFFFT_INPLACE_FIRST_PASS
-#define T_BUILD_INPLACE_FIRST_PASS 1
-#else
-#define T_BUILD_INPLACE_FIRST_PASS 0
+#ifndef PFFFT_INPLACE_FIRST_PASS
+#define T_DEFAULT_INPLACE_FIRST_PASS
 #endif
 
-#include "pffft.c" // NOLINT(bugprone-suspicious-include) -- white-box tests of static kernels
+#include "pffft_impl.h"
+
+#if (PFFFT_TERMINAL_RADIX8 != 0 && PFFFT_TERMINAL_RADIX8 != 1)                                                         \
+    || (PFFFT_INPLACE_FIRST_PASS != 0 && PFFFT_INPLACE_FIRST_PASS != 1)
+#error "Pass schedule switches must be 0 or 1"
+#endif
+#if defined(T_DEFAULT_TERMINAL_RADIX8) && PFFFT_TERMINAL_RADIX8 != (SIMD_SZ != 1)
+#error "Only the single-lane backend defaults to disabling terminal radix 8"
+#endif
+#if defined(T_DEFAULT_INPLACE_FIRST_PASS) && PFFFT_INPLACE_FIRST_PASS != 1
+#error "The in-place first pass must be enabled by default"
+#endif
+
 #define T_EPS         FLT_EPSILON
 
 /* 1 and a report line when cond is false, else 0: fails += T_CHECK(...) */
@@ -221,21 +226,6 @@ t_require_wide(void) {
 #else
 #define T_TEST_W8 0
 #endif
-
-/* the switches are 0 or 1; the defaults, for a switch the build leaves to
-   the header: both on, except the terminal radix-8 pass on the
-   single-lane scalar build (SIMD_SZ == 1), where it is off */
-static int
-test_config(void) {
-    int fails = 0;
-    printf("terminal radix 8: %d, in-place first pass: %d, backend %s x%d\n", PFFFT_TERMINAL_RADIX8,
-           PFFFT_INPLACE_FIRST_PASS, VARCH, SIMD_SZ);
-    fails += T_CHECK(PFFFT_TERMINAL_RADIX8 == 0 || PFFFT_TERMINAL_RADIX8 == 1);
-    fails += T_CHECK(PFFFT_INPLACE_FIRST_PASS == 0 || PFFFT_INPLACE_FIRST_PASS == 1);
-    fails += T_CHECK(T_BUILD_TERMINAL_RADIX8 || PFFFT_TERMINAL_RADIX8 == (SIMD_SZ == 1 ? 0 : 1));
-    fails += T_CHECK(T_BUILD_INPLACE_FIRST_PASS || PFFFT_INPLACE_FIRST_PASS == 1);
-    return fails;
-}
 
 /* the public API, each backend */
 #define T_SETUP             PFFFT_Setup
@@ -399,7 +389,8 @@ test_public_inplace_misaligned(void) {
 int
 main(void) {
     int fails = 0;
-    fails += test_config();
+    printf("terminal radix 8: %d, in-place first pass: %d, backend %s x%d\n", PFFFT_TERMINAL_RADIX8,
+           PFFFT_INPLACE_FIRST_PASS, VARCH, SIMD_SZ);
     fails += test_tolerance();
     fails += run_backend_tests_native();
 #if T_TEST_W8

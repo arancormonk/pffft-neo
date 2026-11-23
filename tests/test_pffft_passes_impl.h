@@ -609,7 +609,9 @@ T_NAME(test_pass_directions)(void) {
                     T_NAME(run_pass)(kind, R, m, l1, xc, b, nvec, w, +1.f);
                     T_NAME(conjugate)(b, nvec, kind == T_NAME(PASS_OL));
                     for (i = 0; i < len; ++i) {
-                        bad += f[i] != b[i]; /* as values: a zero of either sign is equal */
+                        /* A zero error accepts either sign of zero. Widen before subtraction
+                           so even a one-ULP difference between finite floats is detectable. */
+                        bad += !t_within(fabs((double)f[i] - (double)b[i]), 0.0);
                     }
                     if (bad) {
                         printf("  (pass kind %d, radix %d, %d elements per leg, l1 %d: %d values differ between the "
