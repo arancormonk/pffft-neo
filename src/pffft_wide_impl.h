@@ -105,6 +105,7 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #undef VSUB
 #undef VMADD
 #undef VMSUB
+#undef VMSUBR
 #undef LD_PS1
 #undef SVMUL
 #undef SVMADD
@@ -115,11 +116,13 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define VSUB(a, b) _mm256_sub_ps(a, b)
 #define LD_PS1(p)  _mm256_set1_ps(p)
 #if defined(PFFFT_DISABLE_FMA)
-#define VMADD(a, b, c) _mm256_add_ps(_mm256_mul_ps(a, b), c)
-#define VMSUB(a, b, c) _mm256_sub_ps(c, _mm256_mul_ps(a, b))
+#define VMADD(a, b, c)  _mm256_add_ps(_mm256_mul_ps(a, b), c)
+#define VMSUB(a, b, c)  _mm256_sub_ps(c, _mm256_mul_ps(a, b))
+#define VMSUBR(a, b, c) _mm256_sub_ps(_mm256_mul_ps(a, b), c)
 #else
-#define VMADD(a, b, c) _mm256_fmadd_ps(a, b, c)
-#define VMSUB(a, b, c) _mm256_fnmadd_ps(a, b, c)
+#define VMADD(a, b, c)  _mm256_fmadd_ps(a, b, c)
+#define VMSUB(a, b, c)  _mm256_fnmadd_ps(a, b, c)
+#define VMSUBR(a, b, c) _mm256_fmsub_ps(a, b, c)
 #endif
 #define SVMUL(f, v)     VMUL(LD_PS1(f), v)
 #define SVMADD(f, v, c) VMADD(LD_PS1(f), v, c)
@@ -135,6 +138,11 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define passf4_ps            pffft_w8_passf4_ps
 #define passf5_ps            pffft_w8_passf5_ps
 #define passf8_ps            pffft_w8_passf8_ps
+#define passf2_op_body       pffft_w8_passf2_op_body
+#define passf3_op_body       pffft_w8_passf3_op_body
+#define passf4_op_body       pffft_w8_passf4_op_body
+#define passf5_op_body       pffft_w8_passf5_op_body
+#define passf8_op_body       pffft_w8_passf8_op_body
 #define radf2_ps             pffft_w8_radf2_ps
 #define radb2_ps             pffft_w8_radb2_ps
 #define radf3_ps             pffft_w8_radf3_ps
@@ -179,6 +187,11 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define passf3_il_ps         pffft_w8_passf3_il_ps
 #define passf4_il_ps         pffft_w8_passf4_il_ps
 #define passf5_il_ps         pffft_w8_passf5_il_ps
+#define passf2_il_op_body    pffft_w8_passf2_il_op_body
+#define passf3_il_op_body    pffft_w8_passf3_il_op_body
+#define passf4_il_op_body    pffft_w8_passf4_il_op_body
+#define passf5_il_op_body    pffft_w8_passf5_il_op_body
+#define passf4_ol_body       pffft_w8_passf4_ol_body
 #define passf4_ol_ps         pffft_w8_passf4_ol_ps
 #define passf8_ol_ps         pffft_w8_passf8_ol_ps
 #define passf4_il_butterfly  pffft_w8_passf4_il_butterfly
@@ -285,10 +298,13 @@ static ALWAYS_INLINE(void) w8_transpose8(v4sf* r) {
 }
 
 /* in-place 8-point DFT across the vectors x[0..7] (same arithmetic as
-   passf8_ps): fsign = -1 forward, +1 backward, unscaled */
+   passf8_ps): fsign = -1 forward, +1 backward, unscaled. The callers pass
+   fsign as a constant: VADD_FSIGN, VSUB_FSIGN and VCPLXMUL_FSIGN (see
+   simd/pf_float.h) then are the operations of that direction, with the
+   bits of the multiplications by fsign and without them. */
 static ALWAYS_INLINE(void) w8_dft8(v4sf* xr, v4sf* xi, float fsign) {
     static const float K8 = (float)M_SQRT1_2;
-    const float K8s = fsign * K8, nK8 = -K8;
+    const float nK8 = -K8;
     v4sf s0r = VADD(xr[0], xr[4]), s0i = VADD(xi[0], xi[4]);
     v4sf s1r = VADD(xr[1], xr[5]), s1i = VADD(xi[1], xi[5]);
     v4sf s2r = VADD(xr[2], xr[6]), s2i = VADD(xi[2], xi[6]);
@@ -299,47 +315,48 @@ static ALWAYS_INLINE(void) w8_dft8(v4sf* xr, v4sf* xi, float fsign) {
     v4sf d3r = VSUB(xr[3], xr[7]), d3i = VSUB(xi[3], xi[7]);
     v4sf t1r, t1i, t2r, t2i, t3r, t3i, t4r, t4i;
 
-    VCPLXMUL(d1r, d1i, LD_PS1(K8), LD_PS1(K8s)); /* * W8^1 */
-    {
-        v4sf tr = VMUL(LD_PS1(-fsign), d2i), ti = VMUL(LD_PS1(fsign), d2r);
-        d2r = tr;
-        d2i = ti;
-    } /* * W8^2 */
-    VCPLXMUL(d3r, d3i, LD_PS1(nK8), LD_PS1(K8s)); /* * W8^3 */
+    VCPLXMUL_FSIGN(d1r, d1i, K8, K8, fsign); /* * W8^1 = (K8, fsign*K8) */
+    /* d2 * W8^2 = (0, fsign) is (-fsign*d2i, fsign*d2r): the sums and
+       differences of the odd outputs below take d2i and d2r with those
+       signs */
+    VCPLXMUL_FSIGN(d3r, d3i, nK8, K8, fsign); /* * W8^3 = (-K8, fsign*K8) */
 
+    /* the even outputs; t4r and t4i are the differences that are
+       multiplied by fsign */
     t1r = VSUB(s0r, s2r);
     t1i = VSUB(s0i, s2i);
     t2r = VADD(s0r, s2r);
     t2i = VADD(s0i, s2i);
-    t4i = VMUL(VSUB(s1r, s3r), LD_PS1(fsign));
-    t4r = VMUL(VSUB(s3i, s1i), LD_PS1(fsign));
+    t4i = VSUB(s1r, s3r);
+    t4r = VSUB(s3i, s1i);
     t3r = VADD(s1r, s3r);
     t3i = VADD(s1i, s3i);
     xr[0] = VADD(t2r, t3r);
     xi[0] = VADD(t2i, t3i);
-    xr[2] = VADD(t1r, t4r);
-    xi[2] = VADD(t1i, t4i);
+    xr[2] = VADD_FSIGN(t1r, t4r, fsign);
+    xi[2] = VADD_FSIGN(t1i, t4i, fsign);
     xr[4] = VSUB(t2r, t3r);
     xi[4] = VSUB(t2i, t3i);
-    xr[6] = VSUB(t1r, t4r);
-    xi[6] = VSUB(t1i, t4i);
+    xr[6] = VSUB_FSIGN(t1r, t4r, fsign);
+    xi[6] = VSUB_FSIGN(t1i, t4i, fsign);
 
-    t1r = VSUB(d0r, d2r);
-    t1i = VSUB(d0i, d2i);
-    t2r = VADD(d0r, d2r);
-    t2i = VADD(d0i, d2i);
-    t4i = VMUL(VSUB(d1r, d3r), LD_PS1(fsign));
-    t4r = VMUL(VSUB(d3i, d1i), LD_PS1(fsign));
+    /* the odd outputs */
+    t1r = VADD_FSIGN(d0r, d2i, fsign);
+    t1i = VSUB_FSIGN(d0i, d2r, fsign);
+    t2r = VSUB_FSIGN(d0r, d2i, fsign);
+    t2i = VADD_FSIGN(d0i, d2r, fsign);
+    t4i = VSUB(d1r, d3r);
+    t4r = VSUB(d3i, d1i);
     t3r = VADD(d1r, d3r);
     t3i = VADD(d1i, d3i);
     xr[1] = VADD(t2r, t3r);
     xi[1] = VADD(t2i, t3i);
-    xr[3] = VADD(t1r, t4r);
-    xi[3] = VADD(t1i, t4i);
+    xr[3] = VADD_FSIGN(t1r, t4r, fsign);
+    xi[3] = VADD_FSIGN(t1i, t4i, fsign);
     xr[5] = VSUB(t2r, t3r);
     xi[5] = VSUB(t2i, t3i);
-    xr[7] = VSUB(t1r, t4r);
-    xi[7] = VSUB(t1i, t4i);
+    xr[7] = VSUB_FSIGN(t1r, t4r, fsign);
+    xi[7] = VSUB_FSIGN(t1i, t4i, fsign);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1252,6 +1269,11 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform, in
 #undef passf4_ps
 #undef passf5_ps
 #undef passf8_ps
+#undef passf2_op_body
+#undef passf3_op_body
+#undef passf4_op_body
+#undef passf5_op_body
+#undef passf8_op_body
 #undef radf2_ps
 #undef radb2_ps
 #undef radf3_ps
@@ -1296,6 +1318,11 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform, in
 #undef passf3_il_ps
 #undef passf4_il_ps
 #undef passf5_il_ps
+#undef passf2_il_op_body
+#undef passf3_il_op_body
+#undef passf4_il_op_body
+#undef passf5_il_op_body
+#undef passf4_ol_body
 #undef passf4_ol_ps
 #undef passf8_ol_ps
 #undef passf4_il_butterfly

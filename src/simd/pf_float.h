@@ -88,6 +88,40 @@ typedef float vsfscalar;
         (ai) = VMSUB(ar, bi, VMUL(ai, br));                                                                            \
         (ar) = VMADD(ar, br, tmp);                                                                                     \
     }
+/* (ar, ai) times (wr, -wi) for floats wr and wi: VCPLXMUL(ar, ai,
+   LD_PS1(wr), LD_PS1(-wi)) without the negation. Like VCPLXMULCONJ it is
+   the product with a conjugate, but it fuses the products that VCPLXMUL
+   fuses and rounds the other two first, as VCPLXMUL does, so it has the
+   bits of VCPLXMUL for the negated wi. It needs a*b - c, which every
+   backend defines as VMSUBR(a, b, c), fused where its VMADD is
+   (VMSUB(a, b, c) is c - a*b); a backend may define SVCPLXMUL_NEGI
+   itself. wr and wi are lvalues, as LD_PS1 may take their address. */
+#ifndef SVCPLXMUL_NEGI
+#define SVCPLXMUL_NEGI(ar, ai, wr, wi)                                                                                 \
+    {                                                                                                                  \
+        const v4sf br_ = LD_PS1(wr), bi_ = LD_PS1(wi);                                                                 \
+        v4sf tmp;                                                                                                      \
+        tmp = VMUL(ar, bi_);                                                                                           \
+        (ar) = VMADD(ai, bi_, VMUL(ar, br_));                                                                          \
+        (ai) = VMSUBR(ai, br_, tmp);                                                                                   \
+    }
+#endif
+/* Sums and a product with a sign: a + fsign*b, a - fsign*b and (ar, ai)
+   times (wr, fsign*wi), for a float fsign that is +1 or -1, the direction
+   of a complex transform, and floats wr and wi (lvalues). They have the
+   bits of the multiplication by fsign and select the operation by it
+   instead: where fsign is a constant, as it is in every compiled copy of
+   a complex pass, one operation remains. */
+#define VADD_FSIGN(a, b, fsign) ((fsign) > 0 ? VADD(a, b) : VSUB(a, b))
+#define VSUB_FSIGN(a, b, fsign) ((fsign) > 0 ? VSUB(a, b) : VADD(a, b))
+#define VCPLXMUL_FSIGN(ar, ai, wr, wi, fsign)                                                                          \
+    {                                                                                                                  \
+        if ((fsign) > 0) {                                                                                             \
+            VCPLXMUL(ar, ai, LD_PS1(wr), LD_PS1(wi))                                                                   \
+        } else {                                                                                                       \
+            SVCPLXMUL_NEGI(ar, ai, wr, wi)                                                                             \
+        }                                                                                                              \
+    }
 #ifndef SVMUL
 /* multiply a scalar with a vector */
 #define SVMUL(f, v) VMUL(LD_PS1(f), v)

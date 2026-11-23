@@ -35,5 +35,9 @@ main(void) {
     for (i = 0; i < SIMD_SZ; ++i) {
         assert(fabsf(result.f[i]) < 0x1p-47f);
     }
+    result.v = VMSUBR(LD_PS1(aa), LD_PS1(bb), LD_PS1(cc));
+    for (i = 0; i < SIMD_SZ; ++i) {
+        assert(fabsf(result.f[i]) < 0x1p-47f);
+    }
     return 0;
 }

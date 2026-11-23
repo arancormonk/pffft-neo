@@ -1368,6 +1368,19 @@ pffft_assert4(vsfscalar v0, vsfscalar v1, vsfscalar v2, vsfscalar v3, float a, f
     pffft_assert1(v3, d, "[3]", functxt, numErrs, f, lineNo);
 }
 
+/* 1 when two vectors differ in a bit */
+static int
+pffft_lanes_differ(const v4sf_union* a, const v4sf_union* b) {
+    uint32_t ua[4], ub[4];
+    int k, differ = 0;
+    memcpy(ua, a->f, sizeof(ua));
+    memcpy(ub, b->f, sizeof(ub));
+    for (k = 0; k < 4; ++k) {
+        differ |= ua[k] != ub[k];
+    }
+    return differ;
+}
+
 #define PFFFT_ASSERT4(V, a, b, c, d, FUNCTXT)                                                                          \
     pffft_assert4((V).f[0], (V).f[1], (V).f[2], (V).f[3], a, b, c, d, FUNCTXT, &numErrs, __FILE__, __LINE__)
 
@@ -1618,6 +1631,90 @@ FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
         PFFFT_ASSERT4(B, 1.0F, 2.0F, 3.0F, 4.0F, "VMSUB(): Inp B");
         PFFFT_ASSERT4(C, 100.0F, 101.0F, 102.0F, 103.0F, "VMSUB(): Inp C");
         PFFFT_ASSERT4(D, 89.0F, 77.0F, 63.0F, 47.0F, "VMSUB(): Out D");
+    }
+
+    {
+        v4sf_union A, B, C, D;
+        int k;
+        for (k = 0; k < 4; ++k) {
+            A.f[k] = 10 + k + 1;
+        }
+        for (k = 0; k < 4; ++k) {
+            B.f[k] = k + 1;
+        }
+        for (k = 0; k < 4; ++k) {
+            C.f[k] = 100 + k;
+        }
+        for (k = 0; k < 4; ++k) {
+            D.f[k] = 40 + k + 1;
+        }
+
+        if (DbgOut) {
+            fprintf(DbgOut, "\ninput: A,B,C = {\n");
+            fprintf(DbgOut, "  Inp A:  %f, %f, %f, %f\n", A.f[0], A.f[1], A.f[2], A.f[3]);
+            fprintf(DbgOut, "  Inp B:  %f, %f, %f, %f\n", B.f[0], B.f[1], B.f[2], B.f[3]);
+            fprintf(DbgOut, "  Inp C:  %f, %f, %f, %f\n", C.f[0], C.f[1], C.f[2], C.f[3]);
+            fprintf(DbgOut, "}\n");
+        }
+        D.v = VMSUBR(A.v, B.v, C.v);
+        if (DbgOut) {
+            fprintf(DbgOut, "D = VMSUBR(A,B,C) => {\n");
+            fprintf(DbgOut, "  Out D:  %f, %f, %f, %f\n", D.f[0], D.f[1], D.f[2], D.f[3]);
+            fprintf(DbgOut, "}\n");
+        }
+        PFFFT_ASSERT4(A, 11.0F, 12.0F, 13.0F, 14.0F, "VMSUBR(): Inp A");
+        PFFFT_ASSERT4(B, 1.0F, 2.0F, 3.0F, 4.0F, "VMSUBR(): Inp B");
+        PFFFT_ASSERT4(C, 100.0F, 101.0F, 102.0F, 103.0F, "VMSUBR(): Inp C");
+        PFFFT_ASSERT4(D, -89.0F, -77.0F, -63.0F, -47.0F, "VMSUBR(): Out D");
+    }
+
+    {
+        /* VADD_FSIGN, VSUB_FSIGN and VCPLXMUL_FSIGN have the bits of the
+           multiplication by the sign that they replace, also where zeros
+           of either sign and values that cancel meet: every combination of
+           the values below, a different one in each lane */
+        static const float vals[] = {0.0F, -0.0F, 1.0F, -1.0F, 3.0F, 0.3F, -0.7F, 1.0e-3F, -5.0e5F, 0.999999F};
+        const int nv = (int)(sizeof(vals) / sizeof(vals[0]));
+        int s, i, j, m, n, k, bad = 0;
+        for (s = 0; s < 2; ++s) {
+            const float fs = s ? -1.0F : 1.0F;
+            for (i = 0; i < nv; ++i) {
+                for (j = 0; j < nv; ++j) {
+                    for (m = 0; m < nv; ++m) {
+                        for (n = 0; n < nv; ++n) {
+                            const float wr = vals[m], wi = vals[n], swi = fs * vals[n];
+                            v4sf_union A, B, T, U, R, Q;
+                            for (k = 0; k < 4; ++k) {
+                                A.f[k] = vals[(i + k) % nv];
+                                B.f[k] = vals[(j + 3 * k) % nv];
+                            }
+                            T.v = VADD_FSIGN(A.v, B.v, fs);
+                            R.v = VADD(A.v, VMUL(B.v, LD_PS1(fs)));
+                            bad += pffft_lanes_differ(&T, &R);
+                            T.v = VSUB_FSIGN(A.v, B.v, fs);
+                            R.v = VSUB(A.v, VMUL(B.v, LD_PS1(fs)));
+                            bad += pffft_lanes_differ(&T, &R);
+                            T = A;
+                            U = B;
+                            VCPLXMUL_FSIGN(T.v, U.v, wr, wi, fs);
+                            R = A;
+                            Q = B;
+                            VCPLXMUL(R.v, Q.v, LD_PS1(wr), LD_PS1(swi));
+                            bad += pffft_lanes_differ(&T, &R) | pffft_lanes_differ(&U, &Q);
+                        }
+                    }
+                }
+            }
+        }
+        if (DbgOut) {
+            fprintf(DbgOut, "\nVADD_FSIGN, VSUB_FSIGN, VCPLXMUL_FSIGN => %d results differ from the multiplication\n",
+                    bad);
+        }
+        if (bad) {
+            fprintf(stderr, "VADD_FSIGN(), VSUB_FSIGN(), VCPLXMUL_FSIGN(): %d results differ from the multiplication\n",
+                    bad);
+            ++numErrs;
+        }
     }
 
     {

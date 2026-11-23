@@ -67,19 +67,23 @@
    the including file defines before it and undefines after it, a pattern
    that CodeQL's cpp/missing-header-guard recognises as a template header.
 
+   The eight complex codelets passf2/3/4/5 and passf2/3/4/5_il are
+   always-inline bodies that take the direction of the transform, fsign,
+   as a parameter. The functions passf2_ps, ..., passf5_il_ps hold a copy
+   of their body for each direction (PF_PASS_DIRECTIONS below).
+
    The including file sets PF_INPLACE_CODELETS to 0 or 1, as it sets
-   PF_FUSED_LAYOUT. With 0 the file compiles everything. With
+   PF_FUSED_LAYOUT. With 0 the file compiles everything, the eight bodies
+   as passf2_op_body, ..., passf5_il_op_body, with 'restrict'. With
    PFFFT_INPLACE_FIRST_PASS or PFFFT_DEPTH_FIRST and the fused layout,
    that inclusion includes the file once more, with PF_INPLACE_CODELETS 1,
    and sets it back to 0 afterwards. The inclusion with 1 compiles only
-   the eight complex
-   codelets passf2/3/4/5_ps and passf2/3/4/5_il_ps, a second time, as the
-   always-inline bodies passf2_body, ..., passf5_il_body without
-   'restrict', for the in-place first-pass wrappers (passf2_ip_ps, ...,
-   passf5_il_ip_ps); only the function header changes, through PF_CODELET,
-   PF_CODELET_NAME and PF_CODELET_RESTRICT. Only the eight codelets (with
-   their local macros), the definitions of those three macros and the
-   #ifdef PF_FUSED_LAYOUT around the four _il codelets are outside
+   the eight bodies, a second time, as passf2_body, ..., passf5_il_body
+   without 'restrict', for the in-place first-pass wrappers (passf2_ip_ps,
+   ..., passf5_il_ip_ps); only the function header changes, through
+   PF_CODELET_NAME and PF_CODELET_RESTRICT. Only the eight bodies (with
+   their local macros), the definitions of those two macros and the
+   #ifdef PF_FUSED_LAYOUT around the four _il bodies are outside
    #if !PF_INPLACE_CODELETS. */
 
 #ifndef PF_INPLACE_CODELETS
@@ -90,26 +94,47 @@
 #include "pffft_pass_config.h" /* PFFFT_TERMINAL_RADIX8, PFFFT_INPLACE_FIRST_PASS */
 #endif
 
-/* the header of the eight codelets compiled twice: the regular codelet,
-   or the body of an in-place wrapper */
-#undef PF_CODELET
+/* the header of the eight codelet bodies compiled twice: for the regular
+   codelets, or for the in-place wrappers */
 #undef PF_CODELET_NAME
 #undef PF_CODELET_RESTRICT
 #if PF_INPLACE_CODELETS
-#define PF_CODELET(t)         ALWAYS_INLINE(t)
 #define PF_CODELET_NAME(name) name##_body
 #define PF_CODELET_RESTRICT
 #else
-#define PF_CODELET(t)         NEVER_INLINE(t)
-#define PF_CODELET_NAME(name) name##_ps
+#define PF_CODELET_NAME(name) name##_op_body
 #define PF_CODELET_RESTRICT   RESTRICT
+
+/*
+  The direction of a complex pass: fsign is -1 for the forward transform
+  and +1 for the backward one. All a pass does with it is multiply by it:
+  the imaginary parts of its twiddles, and differences or constants of its
+  butterfly. In its loops a body does that with VADD_FSIGN, VSUB_FSIGN and
+  VCPLXMUL_FSIGN (simd/pf_float.h), which select the operation by the sign
+  and give the bits of the multiplication. Every function that holds a
+  body calls it once for each sign, with fsign a constant, so that the
+  compiler keeps the operations of that direction alone: the function has
+  a forward and a backward copy of the pass, and neither multiplies by
+  fsign in a loop.
+
+  PF_PASS_DIRECTIONS(fsign, body, ...) is that pair of calls,
+  body(..., +1) and body(..., -1), for the fsign of the function.
+*/
+#define PF_PASS_DIRECTIONS(fsign, body, ...)                                                                           \
+    {                                                                                                                  \
+        if ((fsign) > 0) {                                                                                             \
+            body(__VA_ARGS__, +1.f);                                                                                   \
+        } else {                                                                                                       \
+            body(__VA_ARGS__, -1.f);                                                                                   \
+        }                                                                                                              \
+    }
 #endif
 
 /*
   passf2 and passb2 has been merged here, fsign = -1 for passf2, +1 for passb2
 */
-static PF_CODELET(void) PF_CODELET_NAME(passf2)(int ido, int l1, const v4sf* PF_CODELET_RESTRICT cc,
-                                                v4sf* PF_CODELET_RESTRICT ch, const float* wa1, float fsign) {
+static ALWAYS_INLINE(void) PF_CODELET_NAME(passf2)(int ido, int l1, const v4sf* PF_CODELET_RESTRICT cc,
+                                                   v4sf* PF_CODELET_RESTRICT ch, const float* wa1, float fsign) {
     int k, i;
     int l1ido = l1 * ido;
     if (ido <= 2) {
@@ -124,10 +149,10 @@ static PF_CODELET(void) PF_CODELET_NAME(passf2)(int ido, int l1, const v4sf* PF_
             for (i = 0; i < ido - 1; i += 2) {
                 v4sf tr2 = VSUB(VLD(cc, i + 0), VLD(cc, i + ido + 0));
                 v4sf ti2 = VSUB(VLD(cc, i + 1), VLD(cc, i + ido + 1));
-                v4sf wr = LD_PS1(wa1[i]), wi = VMUL(LD_PS1(fsign), LD_PS1(wa1[i + 1]));
+                const float wr = wa1[i], wi = wa1[i + 1];
                 VST(ch, i, VADD(VLD(cc, i + 0), VLD(cc, i + ido + 0)));
                 VST(ch, i + 1, VADD(VLD(cc, i + 1), VLD(cc, i + ido + 1)));
-                VCPLXMUL(tr2, ti2, wr, wi);
+                VCPLXMUL_FSIGN(tr2, ti2, wr, wi, fsign);
                 VST(ch, i + l1ido, tr2);
                 VST(ch, i + l1ido + 1, ti2);
             }
@@ -142,7 +167,7 @@ static PF_CODELET(void) PF_CODELET_NAME(passf2)(int ido, int l1, const v4sf* PF_
   without an 'f' suffix, for when this file is compiled with '#define float double'.
   In the float build, the values round to the same floats as the old suffixed literals.
 */
-static PF_CODELET(void)
+static ALWAYS_INLINE(void)
     PF_CODELET_NAME(passf3)(int ido, int l1, const v4sf* PF_CODELET_RESTRICT cc, v4sf* PF_CODELET_RESTRICT ch,
                             const float* wa1, const float* wa2, float fsign) {
     static const float taur = (float)-0.5;              /* cos(2*pi/3)   */
@@ -167,23 +192,24 @@ static PF_CODELET(void)
             di2 = VADD(ci2, cr3);
             di3 = VSUB(ci2, cr3);
             wr1 = wa1[i];
-            wi1 = fsign * wa1[i + 1];
+            wi1 = wa1[i + 1];
             wr2 = wa2[i];
-            wi2 = fsign * wa2[i + 1];
-            VCPLXMUL(dr2, di2, LD_PS1(wr1), LD_PS1(wi1));
+            wi2 = wa2[i + 1];
+            VCPLXMUL_FSIGN(dr2, di2, wr1, wi1, fsign);
             VST(ch, i + l1ido, dr2);
             VST(ch, i + l1ido + 1, di2);
-            VCPLXMUL(dr3, di3, LD_PS1(wr2), LD_PS1(wi2));
+            VCPLXMUL_FSIGN(dr3, di3, wr2, wi2, fsign);
             VST(ch, i + 2 * l1ido, dr3);
             VST(ch, i + 2 * l1ido + 1, di3);
         }
     }
 } /* passf3 */
 
-static PF_CODELET(void)
+static ALWAYS_INLINE(void)
     PF_CODELET_NAME(passf4)(int ido, int l1, const v4sf* PF_CODELET_RESTRICT cc, v4sf* PF_CODELET_RESTRICT ch,
                             const float* wa1, const float* wa2, const float* wa3, float fsign) {
-    /* isign == -1 for forward transform and +1 for backward transform */
+    /* fsign == -1 for forward transform and +1 for backward transform; tr4
+       and ti4 are the differences that FFTPACK multiplies by it */
 
     int i, k;
     v4sf ci2, ci3, ci4, cr2, cr3, cr4, ti1, ti2, ti3, ti4, tr1, tr2, tr3, tr4;
@@ -194,19 +220,19 @@ static PF_CODELET(void)
             tr2 = VADD(VLD(cc, 0), VLD(cc, 2 * ido + 0));
             ti1 = VSUB(VLD(cc, 1), VLD(cc, 2 * ido + 1));
             ti2 = VADD(VLD(cc, 1), VLD(cc, 2 * ido + 1));
-            ti4 = VMUL(VSUB(VLD(cc, 1 * ido + 0), VLD(cc, 3 * ido + 0)), LD_PS1(fsign));
-            tr4 = VMUL(VSUB(VLD(cc, 3 * ido + 1), VLD(cc, 1 * ido + 1)), LD_PS1(fsign));
+            ti4 = VSUB(VLD(cc, 1 * ido + 0), VLD(cc, 3 * ido + 0));
+            tr4 = VSUB(VLD(cc, 3 * ido + 1), VLD(cc, 1 * ido + 1));
             tr3 = VADD(VLD(cc, ido + 0), VLD(cc, 3 * ido + 0));
             ti3 = VADD(VLD(cc, ido + 1), VLD(cc, 3 * ido + 1));
 
             VST(ch, 0 * l1ido + 0, VADD(tr2, tr3));
             VST(ch, 0 * l1ido + 1, VADD(ti2, ti3));
-            VST(ch, 1 * l1ido + 0, VADD(tr1, tr4));
-            VST(ch, 1 * l1ido + 1, VADD(ti1, ti4));
+            VST(ch, 1 * l1ido + 0, VADD_FSIGN(tr1, tr4, fsign));
+            VST(ch, 1 * l1ido + 1, VADD_FSIGN(ti1, ti4, fsign));
             VST(ch, 2 * l1ido + 0, VSUB(tr2, tr3));
             VST(ch, 2 * l1ido + 1, VSUB(ti2, ti3));
-            VST(ch, 3 * l1ido + 0, VSUB(tr1, tr4));
-            VST(ch, 3 * l1ido + 1, VSUB(ti1, ti4));
+            VST(ch, 3 * l1ido + 0, VSUB_FSIGN(tr1, tr4, fsign));
+            VST(ch, 3 * l1ido + 1, VSUB_FSIGN(ti1, ti4, fsign));
         }
     } else {
         for (k = 0; k < l1ido; k += ido, ch += ido, cc += 4 * ido) {
@@ -216,8 +242,8 @@ static PF_CODELET(void)
                 tr2 = VADD(VLD(cc, i + 0), VLD(cc, i + 2 * ido + 0));
                 ti1 = VSUB(VLD(cc, i + 1), VLD(cc, i + 2 * ido + 1));
                 ti2 = VADD(VLD(cc, i + 1), VLD(cc, i + 2 * ido + 1));
-                tr4 = VMUL(VSUB(VLD(cc, i + 3 * ido + 1), VLD(cc, i + 1 * ido + 1)), LD_PS1(fsign));
-                ti4 = VMUL(VSUB(VLD(cc, i + 1 * ido + 0), VLD(cc, i + 3 * ido + 0)), LD_PS1(fsign));
+                tr4 = VSUB(VLD(cc, i + 3 * ido + 1), VLD(cc, i + 1 * ido + 1));
+                ti4 = VSUB(VLD(cc, i + 1 * ido + 0), VLD(cc, i + 3 * ido + 0));
                 tr3 = VADD(VLD(cc, i + ido + 0), VLD(cc, i + 3 * ido + 0));
                 ti3 = VADD(VLD(cc, i + ido + 1), VLD(cc, i + 3 * ido + 1));
 
@@ -226,25 +252,25 @@ static PF_CODELET(void)
                 VST(ch, i + 1, VADD(ti2, ti3));
                 ci3 = VSUB(ti2, ti3);
 
-                cr2 = VADD(tr1, tr4);
-                cr4 = VSUB(tr1, tr4);
-                ci2 = VADD(ti1, ti4);
-                ci4 = VSUB(ti1, ti4);
+                cr2 = VADD_FSIGN(tr1, tr4, fsign);
+                cr4 = VSUB_FSIGN(tr1, tr4, fsign);
+                ci2 = VADD_FSIGN(ti1, ti4, fsign);
+                ci4 = VSUB_FSIGN(ti1, ti4, fsign);
                 wr1 = wa1[i];
-                wi1 = fsign * wa1[i + 1];
-                VCPLXMUL(cr2, ci2, LD_PS1(wr1), LD_PS1(wi1));
+                wi1 = wa1[i + 1];
+                VCPLXMUL_FSIGN(cr2, ci2, wr1, wi1, fsign);
                 wr2 = wa2[i];
-                wi2 = fsign * wa2[i + 1];
+                wi2 = wa2[i + 1];
                 VST(ch, i + l1ido, cr2);
                 VST(ch, i + l1ido + 1, ci2);
 
-                VCPLXMUL(cr3, ci3, LD_PS1(wr2), LD_PS1(wi2));
+                VCPLXMUL_FSIGN(cr3, ci3, wr2, wi2, fsign);
                 wr3 = wa3[i];
-                wi3 = fsign * wa3[i + 1];
+                wi3 = wa3[i + 1];
                 VST(ch, i + 2 * l1ido, cr3);
                 VST(ch, i + 2 * l1ido + 1, ci3);
 
-                VCPLXMUL(cr4, ci4, LD_PS1(wr3), LD_PS1(wi3));
+                VCPLXMUL_FSIGN(cr4, ci4, wr3, wi3, fsign);
                 VST(ch, i + 3 * l1ido, cr4);
                 VST(ch, i + 3 * l1ido + 1, ci4);
             }
@@ -255,7 +281,7 @@ static PF_CODELET(void)
 /*
   passf5 and passb5 has been merged here, fsign = -1 for passf5, +1 for passb5
 */
-static PF_CODELET(void)
+static ALWAYS_INLINE(void)
     PF_CODELET_NAME(passf5)(int ido, int l1, const v4sf* PF_CODELET_RESTRICT cc, v4sf* PF_CODELET_RESTRICT ch,
                             const float* wa1, const float* wa2, const float* wa3, const float* wa4, float fsign) {
     static const float tr11 = (float)0.30901699437494742410;  /* cos(2*pi/5) = (sqrt(5)-1)/4 */
@@ -315,23 +341,23 @@ static PF_CODELET(void)
             di5 = VSUB(ci2, cr5);
             di2 = VADD(ci2, cr5);
             wr1 = wa1[i];
-            wi1 = fsign * wa1[i + 1];
+            wi1 = wa1[i + 1];
             wr2 = wa2[i];
-            wi2 = fsign * wa2[i + 1];
+            wi2 = wa2[i + 1];
             wr3 = wa3[i];
-            wi3 = fsign * wa3[i + 1];
+            wi3 = wa3[i + 1];
             wr4 = wa4[i];
-            wi4 = fsign * wa4[i + 1];
-            VCPLXMUL(dr2, di2, LD_PS1(wr1), LD_PS1(wi1));
+            wi4 = wa4[i + 1];
+            VCPLXMUL_FSIGN(dr2, di2, wr1, wi1, fsign);
             VST(ch, ch_idx(i - 1, 2), dr2);
             VST(ch, ch_idx(i, 2), di2);
-            VCPLXMUL(dr3, di3, LD_PS1(wr2), LD_PS1(wi2));
+            VCPLXMUL_FSIGN(dr3, di3, wr2, wi2, fsign);
             VST(ch, ch_idx(i - 1, 3), dr3);
             VST(ch, ch_idx(i, 3), di3);
-            VCPLXMUL(dr4, di4, LD_PS1(wr3), LD_PS1(wi3));
+            VCPLXMUL_FSIGN(dr4, di4, wr3, wi3, fsign);
             VST(ch, ch_idx(i - 1, 4), dr4);
             VST(ch, ch_idx(i, 4), di4);
-            VCPLXMUL(dr5, di5, LD_PS1(wr4), LD_PS1(wi4));
+            VCPLXMUL_FSIGN(dr5, di5, wr4, wi4, fsign);
             VST(ch, ch_idx(i - 1, 5), dr5);
             VST(ch, ch_idx(i, 5), di5);
         }
@@ -343,6 +369,27 @@ static PF_CODELET(void)
 }
 
 #if !PF_INPLACE_CODELETS
+/* the four codelets as functions, for either direction */
+static NEVER_INLINE(void)
+    passf2_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf2_op_body, ido, l1, cc, ch, wa1);
+}
+
+static NEVER_INLINE(void) passf3_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1,
+                                    const float* wa2, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf3_op_body, ido, l1, cc, ch, wa1, wa2);
+}
+
+static NEVER_INLINE(void) passf4_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1,
+                                    const float* wa2, const float* wa3, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf4_op_body, ido, l1, cc, ch, wa1, wa2, wa3);
+}
+
+static NEVER_INLINE(void) passf5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, const float* wa1,
+                                    const float* wa2, const float* wa3, const float* wa4, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf5_op_body, ido, l1, cc, ch, wa1, wa2, wa3, wa4);
+}
+
 #if PFFFT_TERMINAL_RADIX8
 /*
   passf8 and passb8 merged here, fsign = -1 for passf8, +1 for passb8.
@@ -443,14 +490,9 @@ static NEVER_INLINE(void) passf8_ps(int ido, int l1, const v4sf* cc, v4sf* ch, f
   reachable shape instead of the general ido/l1 loop: the assert
   enforces the invariant at the point of use.
 */
-static NEVER_INLINE(void) passf8_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, float fsign) {
+static ALWAYS_INLINE(void) passf8_op_body(int ido, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, float fsign) {
     static const float K8 = (float)M_SQRT1_2; /* cos(pi/4) = sin(pi/4) = 1/sqrt(2) */
-    const float K8s = fsign * K8;
     const float nK8 = -K8;
-    const float nfsign = -fsign;
-
-    assert(ido == 2 && l1 == 1);
-    (void)l1; /* otherwise unused when assertions are disabled */
 
     /* Load 8 inputs: cc[leg*ido + 0] = real, cc[leg*ido + 1] = imag */
     v4sf x0r = VLD(cc, 0 * ido + 0), x0i = VLD(cc, 0 * ido + 1);
@@ -474,53 +516,55 @@ static NEVER_INLINE(void) passf8_ps(int ido, int l1, const v4sf* RESTRICT cc, v4
 
     /* Step 2: twiddle diffs by W8^k */
     /* d0 *= W8^0 = 1 (no-op) */
-    /* d1 *= W8^1: VCPLXMUL with (K8, fsign*K8) */
-    VCPLXMUL(d1r, d1i, LD_PS1(K8), LD_PS1(K8s));
-    /* d2 *= W8^2 = -j rotation */
-    {
-        v4sf tr = VMUL(LD_PS1(nfsign), d2i);
-        v4sf ti = VMUL(LD_PS1(fsign), d2r);
-        d2r = tr;
-        d2i = ti;
-    }
-    /* d3 *= W8^3: VCPLXMUL with (-K8, fsign*K8) */
-    VCPLXMUL(d3r, d3i, LD_PS1(nK8), LD_PS1(K8s));
+    /* d1 *= W8^1 = (K8, fsign*K8) */
+    VCPLXMUL_FSIGN(d1r, d1i, K8, K8, fsign);
+    /* d2 *= W8^2 = (0, fsign), which makes it (-fsign*d2i, fsign*d2r): the
+       sums and differences of step 4 take d2i and d2r with those signs */
+    /* d3 *= W8^3 = (-K8, fsign*K8) */
+    VCPLXMUL_FSIGN(d3r, d3i, nK8, K8, fsign);
 
-    /* Step 3: DFT-4 on sums -> even outputs (0,2,4,6) */
+    /* Step 3: DFT-4 on sums -> even outputs (0,2,4,6); t4r and t4i are the
+       differences that are multiplied by fsign */
     {
         v4sf t1r = VSUB(s0r, s2r), t1i = VSUB(s0i, s2i);
         v4sf t2r = VADD(s0r, s2r), t2i = VADD(s0i, s2i);
-        v4sf t4i = VMUL(VSUB(s1r, s3r), LD_PS1(fsign));
-        v4sf t4r = VMUL(VSUB(s3i, s1i), LD_PS1(fsign));
+        v4sf t4i = VSUB(s1r, s3r);
+        v4sf t4r = VSUB(s3i, s1i);
         v4sf t3r = VADD(s1r, s3r), t3i = VADD(s1i, s3i);
 
         VST(ch, 0 * ido + 0, VADD(t2r, t3r));
         VST(ch, 0 * ido + 1, VADD(t2i, t3i));
-        VST(ch, 2 * ido + 0, VADD(t1r, t4r));
-        VST(ch, 2 * ido + 1, VADD(t1i, t4i));
+        VST(ch, 2 * ido + 0, VADD_FSIGN(t1r, t4r, fsign));
+        VST(ch, 2 * ido + 1, VADD_FSIGN(t1i, t4i, fsign));
         VST(ch, 4 * ido + 0, VSUB(t2r, t3r));
         VST(ch, 4 * ido + 1, VSUB(t2i, t3i));
-        VST(ch, 6 * ido + 0, VSUB(t1r, t4r));
-        VST(ch, 6 * ido + 1, VSUB(t1i, t4i));
+        VST(ch, 6 * ido + 0, VSUB_FSIGN(t1r, t4r, fsign));
+        VST(ch, 6 * ido + 1, VSUB_FSIGN(t1i, t4i, fsign));
     }
 
     /* Step 4: DFT-4 on diffs -> odd outputs (1,3,5,7) */
     {
-        v4sf t1r = VSUB(d0r, d2r), t1i = VSUB(d0i, d2i);
-        v4sf t2r = VADD(d0r, d2r), t2i = VADD(d0i, d2i);
-        v4sf t4i = VMUL(VSUB(d1r, d3r), LD_PS1(fsign));
-        v4sf t4r = VMUL(VSUB(d3i, d1i), LD_PS1(fsign));
+        v4sf t1r = VADD_FSIGN(d0r, d2i, fsign), t1i = VSUB_FSIGN(d0i, d2r, fsign);
+        v4sf t2r = VSUB_FSIGN(d0r, d2i, fsign), t2i = VADD_FSIGN(d0i, d2r, fsign);
+        v4sf t4i = VSUB(d1r, d3r);
+        v4sf t4r = VSUB(d3i, d1i);
         v4sf t3r = VADD(d1r, d3r), t3i = VADD(d1i, d3i);
 
         VST(ch, 1 * ido + 0, VADD(t2r, t3r));
         VST(ch, 1 * ido + 1, VADD(t2i, t3i));
-        VST(ch, 3 * ido + 0, VADD(t1r, t4r));
-        VST(ch, 3 * ido + 1, VADD(t1i, t4i));
+        VST(ch, 3 * ido + 0, VADD_FSIGN(t1r, t4r, fsign));
+        VST(ch, 3 * ido + 1, VADD_FSIGN(t1i, t4i, fsign));
         VST(ch, 5 * ido + 0, VSUB(t2r, t3r));
         VST(ch, 5 * ido + 1, VSUB(t2i, t3i));
-        VST(ch, 7 * ido + 0, VSUB(t1r, t4r));
-        VST(ch, 7 * ido + 1, VSUB(t1i, t4i));
+        VST(ch, 7 * ido + 0, VSUB_FSIGN(t1r, t4r, fsign));
+        VST(ch, 7 * ido + 1, VSUB_FSIGN(t1i, t4i, fsign));
     }
+}
+
+static NEVER_INLINE(void) passf8_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch, float fsign) {
+    assert(ido == 2 && l1 == 1);
+    (void)l1; /* otherwise unused when assertions are disabled */
+    PF_PASS_DIRECTIONS(fsign, passf8_op_body, ido, cc, ch);
 } /* passf8 */
 #endif /* PFFFT_TERMINAL_RADIX8 */
 
@@ -1525,8 +1569,8 @@ cfftf1_ps(int n, const v4sf* input_readonly, v4sf* work1, v4sf* work2, const flo
 #endif
 #endif /* !PF_INPLACE_CODELETS */
 
-static PF_CODELET(void) PF_CODELET_NAME(passf2_il)(int ido, const v4sf* PF_CODELET_RESTRICT in,
-                                                   v4sf* PF_CODELET_RESTRICT ch, const float* wa1, float fsign) {
+static ALWAYS_INLINE(void) PF_CODELET_NAME(passf2_il)(int ido, const v4sf* PF_CODELET_RESTRICT in,
+                                                      v4sf* PF_CODELET_RESTRICT ch, const float* wa1, float fsign) {
     int i;
     v4sf c0r, c0i, c1r, c1i;
     if (ido <= 2) {
@@ -1538,23 +1582,24 @@ static PF_CODELET(void) PF_CODELET_NAME(passf2_il)(int ido, const v4sf* PF_CODEL
         VST(ch, ido + 1, VSUB(c0i, c1i));
     } else {
         for (i = 0; i < ido - 1; i += 2) {
-            v4sf tr2, ti2, wr, wi;
+            v4sf tr2, ti2;
+            float wr, wi;
             PF_UNINTERLEAVE2(VLD(in, i), VLD(in, i + 1), c0r, c0i);
             PF_UNINTERLEAVE2(VLD(in, i + ido), VLD(in, i + ido + 1), c1r, c1i);
             tr2 = VSUB(c0r, c1r);
             ti2 = VSUB(c0i, c1i);
-            wr = LD_PS1(wa1[i]);
-            wi = VMUL(LD_PS1(fsign), LD_PS1(wa1[i + 1]));
+            wr = wa1[i];
+            wi = wa1[i + 1];
             VST(ch, i, VADD(c0r, c1r));
             VST(ch, i + 1, VADD(c0i, c1i));
-            VCPLXMUL(tr2, ti2, wr, wi);
+            VCPLXMUL_FSIGN(tr2, ti2, wr, wi, fsign);
             VST(ch, i + ido, tr2);
             VST(ch, i + ido + 1, ti2);
         }
     }
 }
 
-static PF_CODELET(void)
+static ALWAYS_INLINE(void)
     PF_CODELET_NAME(passf3_il)(int ido, const v4sf* PF_CODELET_RESTRICT in, v4sf* PF_CODELET_RESTRICT ch,
                                const float* wa1, const float* wa2, float fsign) {
     static const float taur = (float)-0.5;              /* cos(2*pi/3)   */
@@ -1581,13 +1626,13 @@ static PF_CODELET(void)
         di2 = VADD(ci2, cr3);
         di3 = VSUB(ci2, cr3);
         wr1 = wa1[i];
-        wi1 = fsign * wa1[i + 1];
+        wi1 = wa1[i + 1];
         wr2 = wa2[i];
-        wi2 = fsign * wa2[i + 1];
-        VCPLXMUL(dr2, di2, LD_PS1(wr1), LD_PS1(wi1));
+        wi2 = wa2[i + 1];
+        VCPLXMUL_FSIGN(dr2, di2, wr1, wi1, fsign);
         VST(ch, i + ido, dr2);
         VST(ch, i + ido + 1, di2);
-        VCPLXMUL(dr3, di3, LD_PS1(wr2), LD_PS1(wi2));
+        VCPLXMUL_FSIGN(dr3, di3, wr2, wi2, fsign);
         VST(ch, i + 2 * ido, dr3);
         VST(ch, i + 2 * ido + 1, di3);
     }
@@ -1602,22 +1647,22 @@ static ALWAYS_INLINE(void) passf4_il_butterfly(v4sf c0r, v4sf c0i, v4sf c1r, v4s
     v4sf tr2 = VADD(c0r, c2r);
     v4sf ti1 = VSUB(c0i, c2i);
     v4sf ti2 = VADD(c0i, c2i);
-    v4sf ti4 = VMUL(VSUB(c1r, c3r), LD_PS1(fsign));
-    v4sf tr4 = VMUL(VSUB(c3i, c1i), LD_PS1(fsign));
+    v4sf ti4 = VSUB(c1r, c3r);
+    v4sf tr4 = VSUB(c3i, c1i);
     v4sf tr3 = VADD(c1r, c3r);
     v4sf ti3 = VADD(c1i, c3i);
     y[0] = VADD(tr2, tr3);
     y[1] = VADD(ti2, ti3);
-    y[2] = VADD(tr1, tr4);
-    y[3] = VADD(ti1, ti4);
+    y[2] = VADD_FSIGN(tr1, tr4, fsign);
+    y[3] = VADD_FSIGN(ti1, ti4, fsign);
     y[4] = VSUB(tr2, tr3);
     y[5] = VSUB(ti2, ti3);
-    y[6] = VSUB(tr1, tr4);
-    y[7] = VSUB(ti1, ti4);
+    y[6] = VSUB_FSIGN(tr1, tr4, fsign);
+    y[7] = VSUB_FSIGN(ti1, ti4, fsign);
 }
 #endif /* !PF_INPLACE_CODELETS */
 
-static PF_CODELET(void)
+static ALWAYS_INLINE(void)
     PF_CODELET_NAME(passf4_il)(int ido, const v4sf* PF_CODELET_RESTRICT in, v4sf* PF_CODELET_RESTRICT ch,
                                const float* wa1, const float* wa2, const float* wa3, float fsign) {
     int i;
@@ -1649,8 +1694,8 @@ static PF_CODELET(void)
             tr2 = VADD(c0r, c2r);
             ti1 = VSUB(c0i, c2i);
             ti2 = VADD(c0i, c2i);
-            tr4 = VMUL(VSUB(c3i, c1i), LD_PS1(fsign));
-            ti4 = VMUL(VSUB(c1r, c3r), LD_PS1(fsign));
+            tr4 = VSUB(c3i, c1i);
+            ti4 = VSUB(c1r, c3r);
             tr3 = VADD(c1r, c3r);
             ti3 = VADD(c1i, c3i);
 
@@ -1659,32 +1704,32 @@ static PF_CODELET(void)
             VST(ch, i + 1, VADD(ti2, ti3));
             ci3 = VSUB(ti2, ti3);
 
-            cr2 = VADD(tr1, tr4);
-            cr4 = VSUB(tr1, tr4);
-            ci2 = VADD(ti1, ti4);
-            ci4 = VSUB(ti1, ti4);
+            cr2 = VADD_FSIGN(tr1, tr4, fsign);
+            cr4 = VSUB_FSIGN(tr1, tr4, fsign);
+            ci2 = VADD_FSIGN(ti1, ti4, fsign);
+            ci4 = VSUB_FSIGN(ti1, ti4, fsign);
             wr1 = wa1[i];
-            wi1 = fsign * wa1[i + 1];
-            VCPLXMUL(cr2, ci2, LD_PS1(wr1), LD_PS1(wi1));
+            wi1 = wa1[i + 1];
+            VCPLXMUL_FSIGN(cr2, ci2, wr1, wi1, fsign);
             wr2 = wa2[i];
-            wi2 = fsign * wa2[i + 1];
+            wi2 = wa2[i + 1];
             VST(ch, i + ido, cr2);
             VST(ch, i + ido + 1, ci2);
 
-            VCPLXMUL(cr3, ci3, LD_PS1(wr2), LD_PS1(wi2));
+            VCPLXMUL_FSIGN(cr3, ci3, wr2, wi2, fsign);
             wr3 = wa3[i];
-            wi3 = fsign * wa3[i + 1];
+            wi3 = wa3[i + 1];
             VST(ch, i + 2 * ido, cr3);
             VST(ch, i + 2 * ido + 1, ci3);
 
-            VCPLXMUL(cr4, ci4, LD_PS1(wr3), LD_PS1(wi3));
+            VCPLXMUL_FSIGN(cr4, ci4, wr3, wi3, fsign);
             VST(ch, i + 3 * ido, cr4);
             VST(ch, i + 3 * ido + 1, ci4);
         }
     }
 }
 
-static PF_CODELET(void)
+static ALWAYS_INLINE(void)
     PF_CODELET_NAME(passf5_il)(int ido, const v4sf* PF_CODELET_RESTRICT in, v4sf* PF_CODELET_RESTRICT ch,
                                const float* wa1, const float* wa2, const float* wa3, const float* wa4, float fsign) {
     static const float tr11 = (float)0.30901699437494742410;  /* cos(2*pi/5) = (sqrt(5)-1)/4 */
@@ -1729,32 +1774,53 @@ static PF_CODELET(void)
         di5 = VSUB(ci2, cr5);
         di2 = VADD(ci2, cr5);
         wr1 = wa1[i];
-        wi1 = fsign * wa1[i + 1];
+        wi1 = wa1[i + 1];
         wr2 = wa2[i];
-        wi2 = fsign * wa2[i + 1];
+        wi2 = wa2[i + 1];
         wr3 = wa3[i];
-        wi3 = fsign * wa3[i + 1];
+        wi3 = wa3[i + 1];
         wr4 = wa4[i];
-        wi4 = fsign * wa4[i + 1];
-        VCPLXMUL(dr2, di2, LD_PS1(wr1), LD_PS1(wi1));
+        wi4 = wa4[i + 1];
+        VCPLXMUL_FSIGN(dr2, di2, wr1, wi1, fsign);
         VST(ch, ido + i, dr2);
         VST(ch, ido + i + 1, di2);
-        VCPLXMUL(dr3, di3, LD_PS1(wr2), LD_PS1(wi2));
+        VCPLXMUL_FSIGN(dr3, di3, wr2, wi2, fsign);
         VST(ch, 2 * ido + i, dr3);
         VST(ch, 2 * ido + i + 1, di3);
-        VCPLXMUL(dr4, di4, LD_PS1(wr3), LD_PS1(wi3));
+        VCPLXMUL_FSIGN(dr4, di4, wr3, wi3, fsign);
         VST(ch, 3 * ido + i, dr4);
         VST(ch, 3 * ido + i + 1, di4);
-        VCPLXMUL(dr5, di5, LD_PS1(wr4), LD_PS1(wi4));
+        VCPLXMUL_FSIGN(dr5, di5, wr4, wi4, fsign);
         VST(ch, 4 * ido + i, dr5);
         VST(ch, 4 * ido + i + 1, di5);
     }
 }
 
 #if !PF_INPLACE_CODELETS
+/* the four deinterleaving codelets as functions, for either direction */
+static NEVER_INLINE(void)
+    passf2_il_ps(int ido, const v4sf* RESTRICT in, v4sf* RESTRICT ch, const float* wa1, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf2_il_op_body, ido, in, ch, wa1);
+}
+
+static NEVER_INLINE(void)
+    passf3_il_ps(int ido, const v4sf* RESTRICT in, v4sf* RESTRICT ch, const float* wa1, const float* wa2, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf3_il_op_body, ido, in, ch, wa1, wa2);
+}
+
+static NEVER_INLINE(void) passf4_il_ps(int ido, const v4sf* RESTRICT in, v4sf* RESTRICT ch, const float* wa1,
+                                       const float* wa2, const float* wa3, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf4_il_op_body, ido, in, ch, wa1, wa2, wa3);
+}
+
+static NEVER_INLINE(void) passf5_il_ps(int ido, const v4sf* RESTRICT in, v4sf* RESTRICT ch, const float* wa1,
+                                       const float* wa2, const float* wa3, const float* wa4, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf5_il_op_body, ido, in, ch, wa1, wa2, wa3, wa4);
+}
+
 /* last pass (ido == 2: one complex element per leg) of passf4_ps, storing
    interleaved complex output */
-static NEVER_INLINE(void) passf4_ol_ps(int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT out, float fsign) {
+static ALWAYS_INLINE(void) passf4_ol_body(int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT out, float fsign) {
     const int ido = 2, l1ido = l1 * ido;
     int k;
     for (k = 0; k < l1ido; k += ido, out += ido, cc += 4 * ido) {
@@ -1766,6 +1832,10 @@ static NEVER_INLINE(void) passf4_ol_ps(int l1, const v4sf* RESTRICT cc, v4sf* RE
         PF_INTERLEAVE2_ST(y[4], y[5], out, 2 * l1ido + 0, 2 * l1ido + 1);
         PF_INTERLEAVE2_ST(y[6], y[7], out, 3 * l1ido + 0, 3 * l1ido + 1);
     }
+}
+
+static NEVER_INLINE(void) passf4_ol_ps(int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT out, float fsign) {
+    PF_PASS_DIRECTIONS(fsign, passf4_ol_body, l1, cc, out);
 }
 
 #if PFFFT_TERMINAL_RADIX8
@@ -1818,12 +1888,11 @@ static NEVER_INLINE(void) passf8_ol_ps(int l1, const v4sf* cc, v4sf* out, float 
   passf2_il_ps, loads both legs first and is safe at any ido.)
 
   The bodies come from a second inclusion of this file, with
-  PF_INPLACE_CODELETS 1, which compiles only the eight codelets once more
-  under the names passfR_body and passfR_il_body, force-inlined and without
-  'restrict'. The regular codelets keep 'restrict' and their code. As for
-  every inclusion of this file, the includer (here the file itself) sets
-  the parameter before and resets it after; the rest of this inclusion
-  continues with 0.
+  PF_INPLACE_CODELETS 1, which compiles only the eight bodies once more
+  under the names passfR_body and passfR_il_body, without 'restrict'. The
+  regular codelets keep 'restrict' and their code. As for every inclusion
+  of this file, the includer (here the file itself) sets the parameter
+  before and resets it after; the rest of this inclusion continues with 0.
 */
 #undef PF_INPLACE_CODELETS
 #define PF_INPLACE_CODELETS 1
@@ -1836,42 +1905,42 @@ static NEVER_INLINE(void) passf8_ol_ps(int l1, const v4sf* cc, v4sf* out, float 
 static NEVER_INLINE(void)
     passf4_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, const float* wa3, float fsign) {
     assert(ido > 2);
-    passf4_body(ido, 1, c, c, wa1, wa2, wa3, fsign);
+    PF_PASS_DIRECTIONS(fsign, passf4_body, ido, 1, c, c, wa1, wa2, wa3);
 }
 
 #if PFFFT_INPLACE_FIRST_PASS
 static NEVER_INLINE(void) passf2_ip_ps(int ido, v4sf* c, const float* wa1, float fsign) {
     assert(ido > 2); /* see above: one element per leg is not safe in place */
-    passf2_body(ido, 1, c, c, wa1, fsign);
+    PF_PASS_DIRECTIONS(fsign, passf2_body, ido, 1, c, c, wa1);
 }
 
 static NEVER_INLINE(void) passf3_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, float fsign) {
     assert(ido > 2);
-    passf3_body(ido, 1, c, c, wa1, wa2, fsign);
+    PF_PASS_DIRECTIONS(fsign, passf3_body, ido, 1, c, c, wa1, wa2);
 }
 
 static NEVER_INLINE(void) passf5_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, const float* wa3,
                                        const float* wa4, float fsign) {
     assert(ido > 2);
-    passf5_body(ido, 1, c, c, wa1, wa2, wa3, wa4, fsign);
+    PF_PASS_DIRECTIONS(fsign, passf5_body, ido, 1, c, c, wa1, wa2, wa3, wa4);
 }
 
 static NEVER_INLINE(void) passf2_il_ip_ps(int ido, v4sf* c, const float* wa1, float fsign) {
-    passf2_il_body(ido, c, c, wa1, fsign);
+    PF_PASS_DIRECTIONS(fsign, passf2_il_body, ido, c, c, wa1);
 }
 
 static NEVER_INLINE(void) passf3_il_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, float fsign) {
-    passf3_il_body(ido, c, c, wa1, wa2, fsign);
+    PF_PASS_DIRECTIONS(fsign, passf3_il_body, ido, c, c, wa1, wa2);
 }
 
 static NEVER_INLINE(void)
     passf4_il_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, const float* wa3, float fsign) {
-    passf4_il_body(ido, c, c, wa1, wa2, wa3, fsign);
+    PF_PASS_DIRECTIONS(fsign, passf4_il_body, ido, c, c, wa1, wa2, wa3);
 }
 
 static NEVER_INLINE(void) passf5_il_ip_ps(int ido, v4sf* c, const float* wa1, const float* wa2, const float* wa3,
                                           const float* wa4, float fsign) {
-    passf5_il_body(ido, c, c, wa1, wa2, wa3, wa4, fsign);
+    PF_PASS_DIRECTIONS(fsign, passf5_il_body, ido, c, c, wa1, wa2, wa3, wa4);
 }
 #endif /* PFFFT_INPLACE_FIRST_PASS */
 #endif /* PFFFT_INPLACE_FIRST_PASS || PFFFT_DEPTH_FIRST */
@@ -2421,7 +2490,7 @@ cfftb1_df_ps(int n, v4sf* x, v4sf* out, v4sf* tmp, const float* wa, const int* i
    form, which nothing after it uses. The including file undefines
    PF_INPLACE_CODELETS itself. */
 #if !PF_INPLACE_CODELETS
-#undef PF_CODELET
 #undef PF_CODELET_NAME
 #undef PF_CODELET_RESTRICT
+#undef PF_PASS_DIRECTIONS
 #endif
