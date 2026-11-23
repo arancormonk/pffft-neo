@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: GPL-2.0-or-later AND LicenseRef-PFFFT
+name: Float FFT
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:base-devel@sha256:2de80105abb49f813a85393c6758a4334deb6bcec4a2411bd2f059c0bee6ee4c
+    steps:
+      - name: Install analysis tools
+        run: pacman -Syu --needed --noconfirm git clang llvm cmake ninja python-yaml cppcheck python-gersemi shellcheck shfmt actionlint
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: tools/quality.sh
+
+  sanitizers:
+    name: Linux ASan and UBSan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cmake --preset asan-ubsan-debug
+      - run: cmake --build --preset asan-ubsan-debug --parallel 4
+      - run: ctest --preset asan-ubsan-debug --parallel 4
+
+  fft:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: GCC x64, os: ubuntu-24.04, args: "-DCMAKE_C_FLAGS=-march=x86-64", wide: "1"}
+          - {name: Clang x64 unfused, os: ubuntu-24.04, args: "-DCMAKE_C_COMPILER=clang -DPFFFT_DISABLE_FMA=ON", wide: "1"}
+          - {name: Scalar, os: ubuntu-24.04, args: "-DPFFFT_USE_SIMD=OFF -DPFFFT_USE_SCALAR_VECT=OFF"}
+          - {name: Four scalar lanes, os: ubuntu-24.04, args: "-DPFFFT_USE_SIMD=OFF"}
+          - {name: Linux Arm64, os: ubuntu-24.04-arm}
+          - {name: Apple Arm64, os: macos-latest}
+          - {name: MSVC x64, os: windows-latest, args: "-A x64", wide: "1"}
+          - {name: MSVC x64 LTCG, os: windows-latest, args: "-A x64 -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON", wide: "1"}
+          - {name: MSVC x64 Debug, os: windows-latest, args: "-A x64 -DPFFFT_DISABLE_FMA=ON", config: Debug, wide: "1"}
+          - {name: MSVC Arm64, os: windows-11-arm, args: "-A ARM64"}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install GNU objdump for the MSVC instruction audit
+        if: matrix.os == 'windows-latest'
+        id: msys2
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2.34.0
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-binutils
+      - name: Add GNU objdump to PATH
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} ${{ matrix.args }}
+      - name: Build
+        run: cmake --build build --parallel 4 --config ${{ matrix.config || 'Release' }}
+      - name: Test
+        env:
+          PFFFT_TEST_REQUIRE_WIDE: ${{ matrix.wide || '0' }}
+        run: ctest --test-dir build -C ${{ matrix.config || 'Release' }} --parallel 4 --output-on-failure --no-tests=error
+
+  legacy-x86:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - run: tests/run_emulated_cpu_tests.sh "$RUNNER_TEMP/pffft-qemu"

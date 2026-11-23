@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 by arancormonk <180709949+arancormonk@users.noreply.github.com>
+set -euo pipefail
+exec tools/format.sh --staged

@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: PFFFT-neo CodeQL
+queries:
+  - uses: security-and-quality

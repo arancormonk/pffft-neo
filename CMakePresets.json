@@ -1,0 +1,57 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "quality",
+      "inherits": "release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "PFFFT_BUILD_TESTS": "ON",
+        "PFFFT_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "asan-ubsan-debug",
+      "inherits": "quality",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+      }
+    },
+    {
+      "name": "scalar",
+      "inherits": "release",
+      "cacheVariables": { "PFFFT_USE_SIMD": "OFF", "PFFFT_USE_SCALAR_VECT": "OFF" }
+    },
+    {
+      "name": "unfused",
+      "inherits": "release",
+      "cacheVariables": { "PFFFT_DISABLE_FMA": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "asan-ubsan-debug", "configurePreset": "asan-ubsan-debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "scalar", "configurePreset": "scalar" },
+    { "name": "unfused", "configurePreset": "unfused" }
+  ],
+  "testPresets": [
+    {
+      "name": "asan-ubsan-debug",
+      "configurePreset": "asan-ubsan-debug",
+      "filter": { "exclude": { "name": "^check_isa_baseline(_image)?$" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "scalar", "configurePreset": "scalar", "output": { "outputOnFailure": true } },
+    { "name": "unfused", "configurePreset": "unfused", "output": { "outputOnFailure": true } }
+  ]
+}
