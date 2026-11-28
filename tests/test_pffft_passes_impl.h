@@ -29,6 +29,17 @@
   each test adds the number of its failed checks to the return value.
 */
 
+#if PFFFT_TERMINAL_RADIX8
+/* whether a real plan of per-lane length n may take the radix-6 merge:
+   an array of 4 N = 4 n T_LANES bytes within this lane count's limit */
+static int
+T_NAME(real_radix6)(int n) {
+    const unsigned long long limit = T_LANES == 8 ? (unsigned long long)(PFFFT_REAL_RADIX6_MAX_BYTES_WIDE)
+                                                  : (unsigned long long)(PFFFT_REAL_RADIX6_MAX_BYTES);
+    return 4ULL * T_LANES * (unsigned long long)n <= limit;
+}
+#endif
+
 /* E(n): FFTPACK's factor list for the per-lane length n (the try-lists of
    rffti1_ps and cffti1_ps), then the plan rule restated here. The factors
    go to f[0..]; returns their number. */
@@ -42,11 +53,20 @@ T_NAME(expected_plan)(int n, int cplx, int* f) {
         f[k] = ifac[2 + k];
     }
 #if PFFFT_TERMINAL_RADIX8
-    /* a 2 first and a 4: drop both, the rest in order, then an 8 */
+    /* a 2 first and, for a real plan within the radix-6 limit, a 3: drop
+       both, the rest in order, then a 6; else a 2 first and a 4: the same
+       with an 8 */
     if (nf >= 2 && f[0] == 2) {
-        int j = 1, m = 0;
-        while (j < nf && f[j] != 4) {
+        int j = 1, m = 0, merged = 6;
+        while (j < nf && f[j] != 3) {
             ++j;
+        }
+        if (cplx || !T_NAME(real_radix6)(n) || j == nf) {
+            merged = 8;
+            j = 1;
+            while (j < nf && f[j] != 4) {
+                ++j;
+            }
         }
         if (j < nf) {
             for (k = 1; k < nf; ++k) {
@@ -54,7 +74,7 @@ T_NAME(expected_plan)(int n, int cplx, int* f) {
                     f[m++] = f[k];
                 }
             }
-            f[m] = 8;
+            f[m] = merged;
             nf = m + 1;
         }
     }
@@ -86,18 +106,25 @@ T_NAME(check_plan)(int n, int cplx, const int* ifac, int nf) {
     fails += T_CHECK(prod == n);
 #if PFFFT_TERMINAL_RADIX8
     {
-        /* independent of E: the 8 is the pass with one element per leg, and
-       no stand-alone radix-2 pass is left where a radix-4 pass could
-       absorb it */
-        int has2 = 0, has4 = 0, has8 = 0;
+        /* independent of E: the 8 or 6 is the pass with one element per
+       leg, and no stand-alone radix-2 pass is left where a radix-4 pass
+       (or, for a real plan within the radix-6 limit, a radix-3 one) could
+       absorb it; a 6 only there, an 8 there only without a 3 */
+        const int r6 = !cplx && T_NAME(real_radix6)(n);
+        int has2 = 0, has3 = 0, has4 = 0, has6 = 0, has8 = 0;
         for (k = 0; k < ifac[1]; ++k) {
             has2 |= ifac[2 + k] == 2;
+            has3 |= ifac[2 + k] == 3;
             has4 |= ifac[2 + k] == 4;
+            has6 |= ifac[2 + k] == 6;
             has8 |= ifac[2 + k] == 8;
-            fails += T_CHECK(ifac[2 + k] != 8 || k == ifac[1] - 1);
+            fails += T_CHECK((ifac[2 + k] != 8 && ifac[2 + k] != 6) || k == ifac[1] - 1);
         }
-        fails += T_CHECK(!(has2 && has8));
+        fails += T_CHECK(!(has2 && (has8 || has6)));
         fails += T_CHECK(!(has2 && has4));
+        fails += T_CHECK(!(has6 && !r6));
+        fails += T_CHECK(!(r6 && has2 && has3));
+        fails += T_CHECK(!(r6 && has8 && has3));
     }
 #endif
     if (fails) {
@@ -143,7 +170,7 @@ T_NAME(test_plan_rule)(void) {
                     continue;
                 }
                 T_FN(decompose)(n, ifac, cplx ? cplx_try : real_try);
-                nf = T_FN(terminal_radix8_plan)(ifac);
+                nf = T_FN(terminal_merge_plan)(ifac, !cplx && T_NAME(real_radix6)(n));
                 fails += T_NAME(check_plan)(n, cplx, ifac, nf);
             }
         }
@@ -289,8 +316,8 @@ T_NAME(hc_dft)(const double* x, int L, int stride, double* hc) {
         double re = 0, im = 0;
         for (t = 0; t < L; ++t) {
             const double a = 2 * M_PI * (double)((long)f * t % L) / L;
-            re += x[t * stride] * cos(a);
-            im -= x[t * stride] * sin(a);
+            re += x[(ptrdiff_t)t * stride] * cos(a);
+            im -= x[(ptrdiff_t)t * stride] * sin(a);
         }
         if (f == 0) {
             hc[0] = re;
@@ -306,7 +333,8 @@ T_NAME(hc_dft)(const double* x, int L, int stride, double* hc) {
 /* The real radix-3 and radix-5 passes, one pass at a time, against a DFT
    in double, for odd and (with PFFFT_TERMINAL_RADIX8, the only plans that
    give them one) even ido: an even ido adds the Nyquist elements, and
-   ido == 2 has only those and the DC elements. Group k of a pass of
+   ido == 2 has only those and the DC elements; with PFFFT_TERMINAL_RADIX8
+   also the radix-6 pass, at ido == 1 only. Group k of a pass of
    radix p holds the spectra Y_j, of length ido, of z[j], z[j + p], ... for
    a real z of length L = p*ido: forward they go to the spectrum X of z,
    and backward X goes to p Y_j (unscaled, as all passes). */
@@ -319,7 +347,9 @@ T_NAME(test_real_odd_radix)(void) {
 #endif
     static const int l1s[] = {1, 3};
 
-    enum { IMAX = 16, PMAX = 5, LMAX = 3 };
+    static const int radices[] = {3, 5, 6};
+
+    enum { IMAX = 16, PMAX = 6, LMAX = 3 };
 
     const int V = T_LANES;
     const size_t nf = (size_t)PMAX * IMAX * LMAX * V; /* floats per buffer */
@@ -327,7 +357,7 @@ T_NAME(test_real_odd_radix)(void) {
           *r = t_alloc((size_t)PMAX * IMAX);
     double *want = (double*)malloc(nf * sizeof(double)), z[PMAX * IMAX], X[PMAX * IMAX], Y[PMAX * IMAX];
     const float* w[PMAX - 1];
-    int fails = 0, p, ii, il, dir;
+    int fails = 0, p, ip, ii, il, dir;
     if (!cc || !ch || !wa || !r || !want) {
         fails += T_CHECK(cc && ch && wa && r && want);
         goto done;
@@ -335,10 +365,19 @@ T_NAME(test_real_odd_radix)(void) {
     for (p = 0; p < PMAX - 1; ++p) {
         w[p] = wa + (ptrdiff_t)p * IMAX;
     }
-    for (p = 3; p <= 5; p += 2) {
+    for (ip = 0; ip < (int)(sizeof(radices) / sizeof(radices[0])); ++ip) {
+        p = radices[ip];
+#if !PFFFT_TERMINAL_RADIX8
+        if (p == 6) {
+            continue;
+        }
+#endif
         for (ii = 0; ii < (int)(sizeof(idos) / sizeof(idos[0])); ++ii) {
             const int ido = idos[ii], L = p * ido;
             int j, f;
+            if (p == 6 && ido != 1) {
+                continue;
+            }
             /* the twiddles of leg j as rffti1_ps stores them: cos and sin
                of 2 pi j f/L, f = 1 .. (ido-1)/2 (the forward pass takes
                their conjugates) */
@@ -378,17 +417,22 @@ T_NAME(test_real_odd_radix)(void) {
                             }
                         }
                     }
-                    if (p == 3) {
-                        if (dir == 0) {
-                            T_FN(radf3_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1]);
-                        } else {
-                            T_FN(radb3_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1]);
-                        }
-                    } else if (dir == 0) {
+                    if (p == 3 && dir == 0) {
+                        T_FN(radf3_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1]);
+                    } else if (p == 3) {
+                        T_FN(radb3_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1]);
+                    } else if (p == 5 && dir == 0) {
                         T_FN(radf5_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1], w[2], w[3]);
-                    } else {
+                    } else if (p == 5) {
                         T_FN(radb5_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1], w[2], w[3]);
                     }
+#if PFFFT_TERMINAL_RADIX8
+                    else if (dir == 0) {
+                        T_FN(radf6_ps)(ido, l1, (const T_V*)cc, (T_V*)ch);
+                    } else {
+                        T_FN(radb6_ps)(ido, l1, (const T_V*)cc, (T_V*)ch);
+                    }
+#endif
                     /* |X| and |p Y| are at most L */
                     for (i = 0; i < l1 * L * V; ++i) {
                         const double e = fabs(ch[i] - want[i]) / L;

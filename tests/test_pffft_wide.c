@@ -26,6 +26,18 @@
 #include "pffft_internal.h"
 #include "pffft_cpu_x86.h"
 #include "pffft_wide_select.h"
+/* the pass schedule switches, for the plans test_wide_plan expects; the
+   8-lane backend is built only next to the 4-lane SSE one */
+#define SIMD_SZ 4
+#include "pffft_pass_config.h"
+/* N = 768 within the 8-lane radix-6 limit, evaluated while SIMD_SZ is
+   defined (a limit given as an expression may use it) */
+#if 4 * 768 <= (PFFFT_REAL_RADIX6_MAX_BYTES_WIDE)
+#define T_WIDE_PLAN_RADIX6 1
+#else
+#define T_WIDE_PLAN_RADIX6 0
+#endif
+#undef SIMD_SZ
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -663,6 +675,38 @@ test_select_rule(void) {
     check(desktop_only > 0 && server_only > 0, "select: Zen 3 models' tables differ", desktop_only, server_only);
 }
 
+/* the plan of a forced 8-lane real setup, through pffft_internal_plan
+   (MSVC compiles the 8-lane passes in a translation unit of their own,
+   which test_pffft_passes cannot reach): N = 768, per-lane length
+   96 = 2 4 4 3, an array of 3072 bytes, takes the radix-6 merge where
+   PFFFT_REAL_RADIX6_MAX_BYTES_WIDE is at least that, else the radix-8 one */
+static void
+test_wide_plan(void) {
+#if !PFFFT_TERMINAL_RADIX8
+    static const int plain[] = {2, 4, 4, 3};
+#endif
+    static const int r6[] = {4, 4, 6}, r8[] = {4, 3, 8};
+    const int* want = T_WIDE_PLAN_RADIX6 ? r6 : r8;
+    int nwant = 3, count = 0, k, same;
+    PFFFT_Setup* s = pffft_internal_new_setup(768, PFFFT_REAL, PFFFT_BACKEND_W8);
+    const int* f;
+#if !PFFFT_TERMINAL_RADIX8
+    want = plain;
+    nwant = 4;
+#endif
+    check(s != NULL, "wide plan: setup", 768, 0);
+    if (!s) {
+        return;
+    }
+    f = pffft_internal_plan(s, &count);
+    same = count == nwant;
+    for (k = 0; same && k < count; ++k) {
+        same = f[k] == want[k];
+    }
+    check(same, "wide plan: N = 768 at the radix-6 limit", count, count > 0 ? f[count - 1] : 0);
+    pffft_destroy_setup(s);
+}
+
 /* ---------------- backend selection ---------------- */
 
 static void
@@ -1217,6 +1261,7 @@ main(void) {
     test_selection(have_wide);
     test_size_table(have_wide);
     if (have_wide) {
+        test_wide_plan();
         test_alignment();
     }
 #ifdef PFFFT_TEST_THREADS

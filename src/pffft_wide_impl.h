@@ -161,13 +161,15 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define radb5_dc             pffft_w8_radb5_dc
 #define radb5_rows           pffft_w8_radb5_rows
 #define radb5_ps             pffft_w8_radb5_ps
+#define radf6_ps             pffft_w8_radf6_ps
+#define radb6_ps             pffft_w8_radb6_ps
 #define radf8_ps             pffft_w8_radf8_ps
 #define radb8_ps             pffft_w8_radb8_ps
 #define rfftf1_ps            pffft_w8_rfftf1_ps
 #define rfftb1_ps            pffft_w8_rfftb1_ps
 #define decompose            pffft_w8_decompose
 #define twiddle_cos_sin      pffft_w8_twiddle_cos_sin
-#define terminal_radix8_plan pffft_w8_terminal_radix8_plan
+#define terminal_merge_plan  pffft_w8_terminal_merge_plan
 #define rffti1_ps            pffft_w8_rffti1_ps
 #define cffti1_ps            pffft_w8_cffti1_ps
 #define cffti1_factors       pffft_w8_cffti1_factors
@@ -1300,13 +1302,15 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform, in
 #undef radb5_ps
 #undef radb5_dc
 #undef radb5_rows
+#undef radf6_ps
+#undef radb6_ps
 #undef radf8_ps
 #undef radb8_ps
 #undef rfftf1_ps
 #undef rfftb1_ps
 #undef decompose
 #undef twiddle_cos_sin
-#undef terminal_radix8_plan
+#undef terminal_merge_plan
 #undef rffti1_ps
 #undef cffti1_ps
 #undef cffti1_factors

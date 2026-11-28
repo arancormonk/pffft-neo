@@ -687,11 +687,15 @@ main(int argc, char** argv) {
      3840), 25*2^k (800), 81*32 (2592), 125*32 (4000) and 375*2^k (12000,
      48000). Where the per-lane length has an odd power of two, at least
      8, the real transform puts the radix-8 pass after the 3s and 5s,
-     which then have an even ido: with 4 lanes at 96 but not 192, 1920
-     but not 3840, and at 48000; where pffft_new_setup() picks the 8-lane
-     backend (real N a multiple of 128 in its size table), at 3840 but not
-     1920. All are multiples of 32, so they are valid REAL and COMPLEX
-     sizes for every SIMD_SZ. */
+     which then have an even ido: with 4 lanes at 160, 800, 4000 (no 3),
+     12000 and 48000 (above the radix-6 limit); where pffft_new_setup()
+     picks the 8-lane backend (real N a multiple of 128 in its size
+     table), at 3840 but not 1920. With a 3, up to
+     PFFFT_REAL_RADIX6_MAX_BYTES (4 N bytes; 4096 points with 4 lanes)
+     the last pass is radix 6 instead, the 3s and 5s left then with an
+     even ido too (4 lanes: 96 -> 4, 6; 288, 480, 1152, 1920, 2592). All
+     are multiples of 32, so they are valid REAL and COMPLEX sizes for
+     every SIMD_SZ. */
     {
         static const int sizes[] = {
             32,  64,  128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 96,

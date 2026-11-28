@@ -13,9 +13,10 @@
     pass, the pair is replaced by one twiddle-free radix-8 pass, the one
     with one element per leg (complex factors 2, ..., 4 become ..., 8; real
     factors 2, 4, ..., 3..., 5... become 4..., 3..., 5..., 8, the 3s and
-    5s then with an even ido). One pass fewer
-    over the data; results differ in the last bits at the sizes whose plan
-    changes.
+    5s then with an even ido; or, up to PFFFT_REAL_RADIX6_MAX_BYTES
+    (..._WIDE with 8 lanes), with a twiddle-free radix-6 pass of the 2 and
+    a 3). One pass fewer over the data; results differ in the last bits at
+    the sizes whose plan changes.
 
   PFFFT_INPLACE_FIRST_PASS
     Complex transforms on the backends with fused layout passes: the first
@@ -72,6 +73,30 @@
 #endif
 #ifndef PFFFT_DEPTH_FIRST
 #define PFFFT_DEPTH_FIRST 1
+#endif
+
+/* PFFFT_REAL_RADIX6_MAX_BYTES, PFFFT_REAL_RADIX6_MAX_BYTES_WIDE: with
+   PFFFT_TERMINAL_RADIX8, the largest real transform, in bytes of an array
+   (4 N), whose plan merges its lone factor 2 with a 3 into a radix-6 last
+   pass instead of with a 4 into a radix-8 one, where it has a 3; the
+   first for 4 lanes and the scalar backends, the second for 8 lanes. 0:
+   never. Against the radix-8 merge (real forward and backward, every
+   such N up to 393216), with 4 lanes the radix-6 one took up to 5% less
+   time up to N = 3456 (13.5 KiB) on Haswell (Xeon E5-2697 v3) and, in
+   the forward transform, up to 10% more from N = 4320 (17 KiB) on; on
+   Zen 3, in cache, 2 to 9% less forward and from 2% more to 10% less
+   backward, and out of cache 0 to 3% less. The limit
+   is Haswell's crossover. With 8 lanes (Zen 3) it was -2 to +3% forward
+   and 0 to 5% less backward in cache: not a clear win, so off. (Both
+   lane counts on Zen 3 also ran the backward transform up to 10% faster
+   where N/2 bytes is a multiple of 4096, probably because there the 8
+   output streams of radb8_ps, l1 vectors apart, fall into one cache set;
+   not measured in isolation.) */
+#ifndef PFFFT_REAL_RADIX6_MAX_BYTES
+#define PFFFT_REAL_RADIX6_MAX_BYTES 16384
+#endif
+#ifndef PFFFT_REAL_RADIX6_MAX_BYTES_WIDE
+#define PFFFT_REAL_RADIX6_MAX_BYTES_WIDE 0
 #endif
 
 /* Tuning of PFFFT_DEPTH_FIRST, integer constant expressions too. The
@@ -156,6 +181,9 @@
 #endif
 #if (PFFFT_DEPTH_FIRST_MIN_BYTES) < 0 || (PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE) < 0 || (PFFFT_DEPTH_FIRST_LEAF_BYTES) < 0
 #error "PFFFT_DEPTH_FIRST_MIN_BYTES, ..._MIN_BYTES_WIDE and ..._LEAF_BYTES must not be negative"
+#endif
+#if (PFFFT_REAL_RADIX6_MAX_BYTES) < 0 || (PFFFT_REAL_RADIX6_MAX_BYTES_WIDE) < 0
+#error "PFFFT_REAL_RADIX6_MAX_BYTES and ..._MAX_BYTES_WIDE must not be negative"
 #endif
 #if (PFFFT_DEPTH_FIRST_TILE) < 1 || (PFFFT_DEPTH_FIRST_TILE) > 256                                                     \
     || ((PFFFT_DEPTH_FIRST_TILE) & ((PFFFT_DEPTH_FIRST_TILE) - 1)) != 0

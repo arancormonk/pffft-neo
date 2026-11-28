@@ -31,7 +31,7 @@
   N
   Ncvec      nb of complex simd vectors (N/4 if PFFFT_COMPLEX, N/8 if PFFFT_REAL)
   ifac       the decomposition of N into small integers: N, number of
-             factors, factors (admitted values: 2, 3, 4, 5 or 8)
+             factors, factors (admitted values: 2, 3, 4, 5, 6 or 8)
   kind       PFFFT_SETUP_KIND_*: which backend created the setup
   data       allocated room for twiddle coefs
   e          points into 'data', N/4*3 elements

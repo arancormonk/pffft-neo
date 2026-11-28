@@ -394,7 +394,7 @@ static NEVER_INLINE(void) passf5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4
 /*
   passf8 and passb8 merged here, fsign = -1 for passf8, +1 for passb8.
 
-  The radix-8 pass of terminal_radix8_plan: the last pass of a complex
+  The radix-8 pass of terminal_merge_plan: the last pass of a complex
   transform, with one complex element per leg (ido == 2) and therefore no
   twiddles, for any l1. It replaces the plan's radix-2 pass and its last
   radix-4 pass: the radix-2 pass is dropped and the last radix-4 pass
@@ -644,8 +644,8 @@ static NEVER_INLINE(void) radb2_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
 
 /*
   The odd-radix real passes, radf3/radb3 and radf5/radb5, take an even ido
-  too: terminal_radix8_plan puts the radix-8 pass after the 3s and 5s, so
-  that their ido is a multiple of 8. The pairs (i-1, i) of the i-loop then
+  too: terminal_merge_plan puts the radix-8 or radix-6 pass after the 3s
+  and 5s, so that their ido is a multiple of 8 or 6. The pairs (i-1, i) of the i-loop then
   leave out the last element of each leg, ido-1: the leg's Nyquist term, a
   real x_j at frequency ido/2. Its twiddle, exp(-2 pi i j f/(p ido)) at
   f = ido/2, is exp(-pi i j/p), a constant, so it reads no table entry
@@ -667,7 +667,7 @@ static NEVER_INLINE(void) radb2_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
   slower out of cache (4 lanes, Haswell). With an odd ido a pass keeps
   FFTPACK's loops, DC elements first, and radix 3 its ido == 3 fast path.
   The *_dc and *_rows helpers are the bodies of those loops; even is a
-  constant. Only terminal_radix8_plan gives a 3 or a 5 an even ido, so
+  constant. Only terminal_merge_plan gives a 3 or a 5 an even ido, so
   without PFFFT_TERMINAL_RADIX8 the even-ido code is left out.
 */
 static ALWAYS_INLINE(void) radf3_dc(int ido, int l1, int k, const v4sf* RESTRICT cc, v4sf* RESTRICT ch) {
@@ -744,7 +744,7 @@ static NEVER_INLINE(void)
         return;
     }
 #endif
-    assert(ido % 2 == 1); /* else from terminal_radix8_plan only */
+    assert(ido % 2 == 1); /* else from terminal_merge_plan only */
     for (k = 0; k < l1; k++) {
         radf3_dc(ido, l1, k, cc, ch);
     }
@@ -856,7 +856,7 @@ static NEVER_INLINE(void)
         return;
     }
 #endif
-    assert(ido % 2 == 1); /* else from terminal_radix8_plan only */
+    assert(ido % 2 == 1); /* else from terminal_merge_plan only */
     for (k = 0; k < l1; k++) {
         radb3_dc(ido, l1, k, cc, ch);
     }
@@ -1146,7 +1146,7 @@ static NEVER_INLINE(void) radf5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
         return;
     }
 #endif
-    assert(ido % 2 == 1); /* else from terminal_radix8_plan only */
+    assert(ido % 2 == 1); /* else from terminal_merge_plan only */
     for (k = 1; k <= l1; ++k) {
         radf5_dc(ido, l1, k, cc, ch);
     }
@@ -1279,7 +1279,7 @@ static NEVER_INLINE(void) radb5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
         return;
     }
 #endif
-    assert(ido % 2 == 1); /* else from terminal_radix8_plan only */
+    assert(ido % 2 == 1); /* else from terminal_merge_plan only */
     for (k = 1; k <= l1; ++k) {
         radb5_dc(ido, l1, k, cc, ch);
     }
@@ -1296,7 +1296,7 @@ static NEVER_INLINE(void) radb5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
 
 #if PFFFT_TERMINAL_RADIX8
 /*
-  Radix-8 real passes at ido == 1 (no twiddles), from terminal_radix8_plan:
+  Radix-8 real passes at ido == 1 (no twiddles), from terminal_merge_plan:
   the first pass of the forward transform and the last pass of the backward
   one. They replace the radix-2 pass, the one with the longest twiddle
   table, and a radix-4 pass: both are dropped and the radix-8 pass runs at
@@ -1360,6 +1360,59 @@ static NEVER_INLINE(void) radb8_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
         VST(ch, 7 * l1, VMADD(sq2, f3, e3));
     }
 } /* radb8 */
+
+/*
+  Real radix-6 passes at ido == 1, like radf8_ps and radb8_ps.
+  2 and 3 are coprime, so the 6-point DFT is a 2-point DFT of each of the
+  pairs (x0, x3), (x2, x5), (x4, x1) and a 3-point DFT of their sums and
+  one of their differences, with no twiddles in between (Good-Thomas:
+  input index 3 j1 + 2 j2, output index 3 k1 + 4 k2, mod 6). The sums give
+  X0, X4, X2, the differences X3, X1, X5, of which X0 .. X3 are stored.
+
+  forward:  half-complex R0 R1 I1 R2 I2 R3
+  backward: 6 a_j from the same layout (unscaled)
+*/
+static NEVER_INLINE(void) radf6_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch) {
+    const float ctaur = -0.5f, ctaui = (float)0.86602540378443864676; /* cos, sin(2*pi/3) */
+    const v4sf taur = LD_PS1(ctaur), taui = LD_PS1(ctaui);            /* named: see passf8_ps */
+    int k;
+    assert(ido == 1);
+    (void)ido; /* otherwise unused when assertions are disabled */
+    for (k = 0; k < l1; ++k, ++cc, ch += 6) {
+        v4sf x0 = VLD(cc, 0), x1 = VLD(cc, l1), x2 = VLD(cc, 2 * l1);
+        v4sf x3 = VLD(cc, 3 * l1), x4 = VLD(cc, 4 * l1), x5 = VLD(cc, 5 * l1);
+        v4sf u0 = VADD(x0, x3), u1 = VADD(x2, x5), u2 = VADD(x4, x1);
+        v4sf v0 = VSUB(x0, x3), v1 = VSUB(x2, x5), v2 = VSUB(x4, x1);
+        v4sf su = VADD(u1, u2), sv = VADD(v1, v2);
+        VST(ch, 0, VADD(u0, su));             /* R0 */
+        VST(ch, 1, VMADD(taur, sv, v0));      /* R1 */
+        VST(ch, 2, VMUL(taui, VSUB(v2, v1))); /* I1 */
+        VST(ch, 3, VMADD(taur, su, u0));      /* R2 */
+        VST(ch, 4, VMUL(taui, VSUB(u1, u2))); /* I2 */
+        VST(ch, 5, VADD(v0, sv));             /* R3 */
+    }
+} /* radf6 */
+
+static NEVER_INLINE(void) radb6_ps(int ido, int l1, const v4sf* RESTRICT cc, v4sf* RESTRICT ch) {
+    const float c2 = 2.f, csq3 = (float)1.7320508075688772935; /* 2, sqrt(3) */
+    const v4sf two = LD_PS1(c2), sq3 = LD_PS1(csq3);           /* named: see passf8_ps */
+    int k;
+    assert(ido == 1);
+    (void)ido; /* otherwise unused when assertions are disabled */
+    for (k = 0; k < l1; ++k, cc += 6, ++ch) {
+        v4sf x0 = VLD(cc, 0), r1 = VLD(cc, 1), i1 = VLD(cc, 2);
+        v4sf r2 = VLD(cc, 3), i2 = VLD(cc, 4), x3 = VLD(cc, 5);
+        v4sf u0 = VMADD(two, r2, x0), a = VSUB(x0, r2), b = VMUL(sq3, i2);
+        v4sf v0 = VMADD(two, r1, x3), c = VSUB(x3, r1), d = VMUL(sq3, i1);
+        v4sf u1 = VADD(a, b), u2 = VSUB(a, b), v1 = VSUB(c, d), v2 = VADD(c, d);
+        VST(ch, 0, VADD(u0, v0));
+        VST(ch, 3 * l1, VSUB(u0, v0));
+        VST(ch, 2 * l1, VADD(u1, v1));
+        VST(ch, 5 * l1, VSUB(u1, v1));
+        VST(ch, 4 * l1, VADD(u2, v2));
+        VST(ch, 1 * l1, VSUB(u2, v2));
+    }
+} /* radb6 */
 #endif /* PFFFT_TERMINAL_RADIX8 */
 
 static NEVER_INLINE(v4sf*)
@@ -1377,18 +1430,24 @@ static NEVER_INLINE(v4sf*)
         const int next_ido = ip * ido;
         const float* w = wa + (n - next_ido);
 #if PFFFT_TERMINAL_RADIX8
-        /* radix 8 is tested in front of the switch rather than as a fifth
-       case. check_isa_baseline rejects an indirect jump in 8-lane code
-       while the upper ymm halves may be dirty, unless it proves the jump
-       a local jump table. Here they are clean: the driver has no 256-bit
-       code of its own, and every pass it calls, radix 3 and 5 included,
-       is a NEVER_INLINE function that clears them after its 256-bit code
-       (checked in GCC and Clang Release builds). A jump table passes the
-       audit either way: Clang folds the if and the switch into one, GCC
-       makes one when radix 8 is a fifth case and none as written. */
+        /* radix 8 and 6 are tested in front of the switch rather than as
+       cases of it. check_isa_baseline rejects an indirect jump in 8-lane
+       code while the upper ymm halves may be dirty, unless it proves the
+       jump a local jump table. Here they are clean: the driver has no
+       256-bit code of its own, and every pass it calls, radix 3 and 5
+       included, is a NEVER_INLINE function that clears them after its
+       256-bit code (checked in GCC and Clang Release builds), and the
+       drivers are entered with them clean (the audit follows the state
+       through their callers). A jump table
+       passes the audit either way: Clang folds the ifs and the switch into
+       one, GCC makes one when radix 8 is a fifth case and none as
+       written. */
         if (ip == 8) {
             l1 /= 8;
             radf8_ps(ido, l1, in, out);
+        } else if (ip == 6) {
+            l1 /= 6;
+            radf6_ps(ido, l1, in, out);
         } else
 #endif
             switch (ip) {
@@ -1438,6 +1497,9 @@ static NEVER_INLINE(v4sf*)
         if (ip == 8) {
             ido /= 8;
             radb8_ps(ido, l1, in, out);
+        } else if (ip == 6) {
+            ido /= 6;
+            radb6_ps(ido, l1, in, out);
         } else
 #endif
             switch (ip) {
@@ -1552,45 +1614,59 @@ twiddle_cos_sin(int m, int n, float* c, float* s) {
 /*
   The plan rule of PFFFT_TERMINAL_RADIX8, applied by rffti1_ps and
   cffti1_ps to the factor list decompose() made: no stand-alone radix-2
-  pass. If the list starts with a 2 (decompose puts a 2 first) and has a
-  4, the 2 and a 4 are dropped and an 8 is appended; ifac[1] is updated.
-  Returns the number of factors.
+  pass. If the list starts with a 2 (decompose puts a 2 first), the 2 and
+  a partner are dropped and their product is appended: with radix6 and a
+  3 in the list, the 2 and a 3 make a 6; else, with a 4, the 2 and a 4
+  make an 8. ifac[1] is updated. Returns the number of factors.
 
   The last factor is the pass with one element per leg: the last pass of
   a complex transform in both directions, the first pass of the real
   forward transform and the last of the real backward one. There the
-  radix-8 pass (passf8_ps, radf8_ps, radb8_ps) needs no twiddles.
+  radix-8 and radix-6 passes (passf8_ps, radf8_ps, radb8_ps, radf6_ps,
+  radb6_ps) need no twiddles. Both merges leave as many passes.
   Complex lists 2, 5..., 3..., 4, 4... become 5..., 3..., 4..., 8, with
-  one 4 fewer. Real lists 2, 4, 4..., 3..., 5... become 4..., 3..., 5...,
-  8: the 3s and 5s, which FFTPACK's order {4,2,3,5} puts last so that
-  their ido is odd, then get an even ido (a multiple of 8), which
-  radf3/radb3 and radf5/radb5 handle. The other factors keep their order;
-  no other order of the 4s, 3s and 5s before the 8 was faster beyond the
-  noise (4 lanes, Haswell, N = 480 to 192000), and several were 5 to 10%
-  slower out of cache. The twiddle table needs no change: its offsets add
-  up (ip-1)*ido per pass in any order, and an even ido reads ido-2
-  entries per leg, which is what rffti1_ps fills.
+  one 4 fewer (cffti1_factors does not ask for radix 6). Real lists 2, 4,
+  4..., 3..., 5... become 4..., 3..., 5..., 8, or, with radix6 and a 3,
+  4, 4..., 3..., 5..., 6 with one 3 fewer (rffti1_ps asks for it up to
+  PFFFT_REAL_RADIX6_MAX_BYTES or ..._WIDE, by lane count; see
+  pffft_pass_config.h). The 3s and 5s,
+  which FFTPACK's order {4,2,3,5} puts last so that their ido is odd,
+  then get an even ido (a multiple of 8 or 6), which radf3/radb3 and
+  radf5/radb5 handle. The other factors keep their order; no other order
+  of the 4s, 3s and 5s before the 8 was faster beyond the noise (4 lanes,
+  Haswell, N = 480 to 192000), and several were 5 to 10% slower out of
+  cache. The twiddle table needs no change: its offsets add up (ip-1)*ido
+  per pass in any order, and an even ido reads ido-2 entries per leg,
+  which is what rffti1_ps fills. A list without a 4 (one lane only:
+  2, 3..., 5...) takes the radix-6 merge too.
 */
 static int
-terminal_radix8_plan(int* ifac) {
-    int nf = ifac[1], j = 3, k;
+terminal_merge_plan(int* ifac, int radix6) {
+    int nf = ifac[1], j = 3, k, merged = 6;
     if (nf < 2 || ifac[2] != 2) {
         return nf;
     }
-    while (j <= nf + 1 && ifac[j] != 4) {
+    while (radix6 && j <= nf + 1 && ifac[j] != 3) {
         ++j;
     }
-    if (j > nf + 1) {
-        return nf;
+    if (!radix6 || j > nf + 1) {
+        merged = 8;
+        j = 3;
+        while (j <= nf + 1 && ifac[j] != 4) {
+            ++j;
+        }
+        if (j > nf + 1) {
+            return nf;
+        }
     }
-    /* drop ifac[2], the 2, and ifac[j], the first 4 */
+    /* drop ifac[2], the 2, and ifac[j], the first 3 or 4 */
     for (k = 2; k < j - 1; ++k) {
         ifac[k] = ifac[k + 1];
     }
     for (k = j - 1; k < nf; ++k) {
         ifac[k] = ifac[k + 2];
     }
-    ifac[nf] = 8;
+    ifac[nf] = merged;
     ifac[1] = --nf;
     return nf;
 }
@@ -1604,7 +1680,12 @@ rffti1_ps(int n, float* wa, int* ifac) {
 #if PFFFT_TERMINAL_RADIX8
     int nf;
     decompose(n, ifac, ntryh);
-    nf = terminal_radix8_plan(ifac);
+    /* radix 6 up to the limit of this backend's lane count (bytes of an
+       array: n vectors, 4 N bytes, with any number of lanes) */
+    nf = terminal_merge_plan(ifac, (unsigned long long)n * sizeof(v4sf)
+                                       <= (sizeof(v4sf) == 8 * sizeof(float)
+                                               ? (unsigned long long)(PFFFT_REAL_RADIX6_MAX_BYTES_WIDE)
+                                               : (unsigned long long)(PFFFT_REAL_RADIX6_MAX_BYTES)));
 #else
     int nf = decompose(n, ifac, ntryh);
 #endif
@@ -1638,7 +1719,7 @@ cffti1_factors(int n, int* ifac) {
 #if PFFFT_TERMINAL_RADIX8
     static const int ntryh[] = {5, 3, 4, 2, 0};
     decompose(n, ifac, ntryh);
-    return terminal_radix8_plan(ifac);
+    return terminal_merge_plan(ifac, 0);
 #else
     static const int ntryh_large[] = {5, 3, 8, 4, 2, 0};
     static const int ntryh_default[] = {5, 3, 4, 2, 0};
@@ -1669,7 +1750,7 @@ cffti1_ps(int n, float* wa, int* ifac) {
      lifted.
 
      PFFFT_TERMINAL_RADIX8 == 1: the default try-list for every n, then
-     terminal_radix8_plan: a list 2, ..., 4 becomes ..., 8 (n == 8 still
+     terminal_merge_plan: a list 2, ..., 4 becomes ..., 8 (n == 8 still
      gives the single pass 8), which saves one sweep over the data. */
     int k1, j, ii;
     int nf = cffti1_factors(n, ifac);
