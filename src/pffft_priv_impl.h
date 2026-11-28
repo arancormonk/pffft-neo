@@ -183,18 +183,15 @@ struct SETUP_STRUCT {
 
 /* PFFFT_DEPTH_FIRST for a complex transform of N: 0 for the other
    schedule, else 1 + the number of depth-first passes within a slice.
-   depth_first: PFFFT_DF_AUTO, by the size of a buffer and with the leaves
-   of pffft_pass_config.h; PFFFT_DF_ON, whenever the plan allows it and as
-   deep as it allows; PFFFT_DF_OFF, never. */
+   depth_first: PFFFT_DF_AUTO, where the plan allows it, with the leaves of
+   pffft_pass_config.h (pffft_internal_new_setup() has checked the size of
+   the buffer); PFFFT_DF_ON, whenever the plan allows it and as deep as it
+   allows; PFFFT_DF_OFF, never. */
 static int
 pffft_df_levels(int N, int depth_first) {
     const int forced = depth_first == PFFFT_DF_ON;
     int ifac[IFAC_MAX_SIZE], k, m;
     if (depth_first == PFFFT_DF_OFF) {
-        return 0;
-    }
-    /* "+ 1 >" for ">=": a limit of 0 compares an unsigned value with it */
-    if (!forced && !((size_t)N * 2 * sizeof(float) + 1 > (size_t)(PFFFT_DEPTH_FIRST_MIN_BYTES))) {
         return 0;
     }
     cffti1_factors(N / SIMD_SZ, ifac);

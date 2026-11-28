@@ -396,7 +396,8 @@ main(void) {
 #if T_TEST_W8
     {
         unsigned long long l2;
-        if (pffft_wide_cpu_class(&l2) >= 0) {
+        int vendor;
+        if (pffft_wide_cpu_class(&l2, &vendor) >= 0) {
             fails += run_backend_tests_w8();
         } else if (t_require_wide()) {
             printf("FAIL: the 8-lane backend is not supported by this CPU, and PFFFT_TEST_REQUIRE_WIDE=1 requires its "

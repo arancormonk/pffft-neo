@@ -1219,11 +1219,9 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform, in
     s->df_levels = 0;
     k = 0; /* the entries of w8_df_rev */
 #if PFFFT_DEPTH_FIRST
-    /* as pffft_df_levels of the 4-lane code; "+ 1 >" for ">=": a limit of 0
-       compares an unsigned value with it */
-    if (transform == PFFFT_COMPLEX && depth_first != PFFFT_DF_OFF
-        && (depth_first == PFFFT_DF_ON
-            || (size_t)N * 2 * sizeof(float) + 1 > (size_t)(PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE))) {
+    /* as pffft_df_levels of the 4-lane code: pffft_internal_new_setup() has
+       checked the size for PFFFT_DF_AUTO */
+    if (transform == PFFFT_COMPLEX && depth_first != PFFFT_DF_OFF) {
         int ifac[IFAC_MAX_SIZE];
         cffti1_factors(N / W8_SIMD_SZ, ifac);
         if (cfft_df_top(ifac, W8_DF_TOP)) {

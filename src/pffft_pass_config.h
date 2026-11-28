@@ -28,8 +28,9 @@
 
   PFFFT_DEPTH_FIRST
     Complex transforms on the backends with fused layout passes, from
-    PFFFT_DEPTH_FIRST_MIN_BYTES (4 lanes) or PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE
-    (8 lanes) bytes per buffer on, whose plan starts with radix-4 passes:
+    PFFFT_DEPTH_FIRST_MIN_BYTES (4 lanes; ..._INTEL and ..._AMD on those
+    CPUs) or PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE (8 lanes) bytes per buffer
+    on, whose plan starts with radix-4 passes:
     those passes run in place and depth first, so that a sub-transform is
     finished while it is in the cache, where the other schedule sweeps the
     whole buffer once per pass. The last passes, on sub-transforms of at
@@ -101,32 +102,55 @@
 #define PFFFT_REAL_RADIX6_MAX_BYTES_WIDE 0
 #endif
 
-/* Tuning of PFFFT_DEPTH_FIRST, integer constant expressions too. The
-   defaults are the values measured fastest on a Zen 3 core (32 KiB, 512
-   KiB and 16 MiB of cache) with GCC, over the powers of two from 2^12 to
-   2^22 points and every transform mode: forward and backward, ordered and
-   not, in place and not.
+/* Tuning of PFFFT_DEPTH_FIRST, integer constant expressions too. Measured
+   on a Zen 3 core (Ryzen 9 5950X: 32 KiB, 512 KiB and 32 MiB of cache per
+   eight cores) and a Haswell one (Xeon E5-2697 v3: 32 KiB, 256 KiB and 35
+   MiB), with GCC (on Haswell also Clang), at the powers of two from 2^11
+   to 2^22 points and at 3 * 2^k, whose plans end with a radix-6 pass, in
+   every complex transform mode: forward and backward, ordered and not, in
+   place and not, and a convolution. "Less time" below is the median over
+   the modes against the other schedule.
 
-   PFFFT_DEPTH_FIRST_MIN_BYTES, PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE: the
-   smallest buffer, 8 N bytes of a complex transform, for the depth-first
-   schedule with 4 and with 8 lanes. With 8 lanes it took 4 to 15% less
-   time than the other schedule for buffers of 32 KiB to 2 MiB, between 2%
-   less and 7% more at 4 MiB, where the buffers and tables of both
-   schedules just fill the last cache level, a quarter to a third less at
-   8 MiB and half from 16 MiB on; the default leaves a margin for other
-   caches. With 4 lanes the slices are four times as large (a quarter of
-   the buffer, not a sixteenth), and bringing them back into natural order
-   costs more than the passes gain, 2 to 10% in all, until the buffers
-   leave the last cache level: 7 to 17% less time at 8 MiB, 40% less from
-   16 MiB on.
+   PFFFT_DEPTH_FIRST_MIN_BYTES, ..._INTEL, ..._AMD: the smallest buffer, 8
+   N bytes of a complex transform, for the depth-first schedule with 4
+   lanes. pffft_new_setup() takes ..._INTEL on Intel CPUs and ..._AMD on
+   AMD ones (CPUID vendor, pffft_cpu_x86.h), PFFFT_DEPTH_FIRST_MIN_BYTES on
+   other CPUs, on x86 CPUs whose CPUID stops below leaf 7, and in builds
+   without the 8-lane backend, which has the CPU probe. A build that
+   defines PFFFT_DEPTH_FIRST_MIN_BYTES sets it for every vendor that it
+   does not define a value of its own for: PFFFT_DEPTH_FIRST_MIN_BYTES=0
+   makes every complex 4-lane setup depth first where its plan allows. With
+   4 lanes a slice is a quarter of the buffer (with 8 a sixteenth), and
+   bringing the slices back into natural order costs more than the passes
+   gain until the other schedule runs out of a cache level.
+   - Haswell: depth first took 4 to 14% less time from 512 KiB to 16 MiB,
+     each mode at least 2% less, and a third less at 32 MiB; 3% less at
+     256 KiB (one mode 1% more), 2 and 8% more at 64 and 128 KiB, and
+     about the same below. The other
+     schedule there prefetches its output (PFFFT_PREFETCH,
+     pffft_cpu_x86.h); against it without the prefetches, depth first took
+     12 to 19% less from 32 KiB on.
+   - Zen 3, which does not prefetch: depth first took 2 to 11% more time
+     from 128 KiB to 4 MiB, at 8 MiB about the same (backward 6 to 9%
+     more), 6% less at 16 MiB and 28% less at 32 MiB; at 3 * 2^k, from
+     1.5% less at 48 KiB to 7% more, and the same at 12 MiB.
+   - Other CPUs: 8 MiB, the value first measured on Zen 3.
+
+   PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE: the same with 8 lanes, on every CPU
+   that runs them (by default only measured AMD ones, pffft_wide_select.h).
+   On Zen 3 depth first took 7 to 10% less time from 32 KiB to 2 MiB, every
+   mode less, 0.5 to 3% less at 4 and 8 MiB, and 14% more at
+   16 KiB; at 3 * 2^k 4 to 7% less from 96 KiB to 1.5 MiB, 1% more at 6
+   MiB.
 
    PFFFT_DEPTH_FIRST_LEAF_BYTES: a leaf is the sub-transform that the last
    passes finish between its part of the buffer and scratch of the same
    size, at least two passes. The depth-first passes go on until the leaf
    is not larger than this, so that leaf and scratch stay in the
    first-level cache. Of leaves from 0.5 to 128 KiB, those of 4 to 16 KiB
-   were fastest: smaller ones spend more on calls, larger ones leave the
-   cache.
+   were fastest on Zen 3: smaller ones spend more on calls, larger ones
+   leave the cache. On Haswell 16 KiB was fastest too, 8 KiB the same, 4
+   KiB 1 to 2% slower, 32 and 64 KiB 5 to 11% slower.
 
    PFFFT_DEPTH_FIRST_TILE: regions of a slice that are brought into
    natural order together, a power of two. The elements of a region are
@@ -134,11 +158,25 @@
    the reverse), so a tile makes short runs on the one side and bounds the
    streams on the other. Tiles of 4 were fastest; of 16 and 64, up to 20%
    slower with 8 lanes at 2^20 points and several times slower with 4. */
-#ifndef PFFFT_DEPTH_FIRST_MIN_BYTES
+#if defined(PFFFT_DEPTH_FIRST_MIN_BYTES)
+/* the build's value, for every vendor that has none of its own */
+#ifndef PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL
+#define PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL (PFFFT_DEPTH_FIRST_MIN_BYTES)
+#endif
+#ifndef PFFFT_DEPTH_FIRST_MIN_BYTES_AMD
+#define PFFFT_DEPTH_FIRST_MIN_BYTES_AMD (PFFFT_DEPTH_FIRST_MIN_BYTES)
+#endif
+#else
 #define PFFFT_DEPTH_FIRST_MIN_BYTES (8 * 1024 * 1024)
+#ifndef PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL
+#define PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL (512 * 1024)
+#endif
+#ifndef PFFFT_DEPTH_FIRST_MIN_BYTES_AMD
+#define PFFFT_DEPTH_FIRST_MIN_BYTES_AMD (16 * 1024 * 1024)
+#endif
 #endif
 #ifndef PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE
-#define PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE (128 * 1024)
+#define PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE (32 * 1024)
 #endif
 #ifndef PFFFT_DEPTH_FIRST_LEAF_BYTES
 #define PFFFT_DEPTH_FIRST_LEAF_BYTES 16384
@@ -183,6 +221,9 @@
 #endif
 #if (PFFFT_DEPTH_FIRST_MIN_BYTES) < 0 || (PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE) < 0 || (PFFFT_DEPTH_FIRST_LEAF_BYTES) < 0
 #error "PFFFT_DEPTH_FIRST_MIN_BYTES, ..._MIN_BYTES_WIDE and ..._LEAF_BYTES must not be negative"
+#endif
+#if (PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL) < 0 || (PFFFT_DEPTH_FIRST_MIN_BYTES_AMD) < 0
+#error "PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL and ..._MIN_BYTES_AMD must not be negative"
 #endif
 #if (PFFFT_REAL_RADIX6_MAX_BYTES) < 0 || (PFFFT_REAL_RADIX6_MAX_BYTES_WIDE) < 0
 #error "PFFFT_REAL_RADIX6_MAX_BYTES and ..._MAX_BYTES_WIDE must not be negative"

@@ -7,8 +7,8 @@
   Tests of src/pffft_pass_config.h: what it leaves in PFFFT_TERMINAL_RADIX8
   and PFFFT_INPLACE_FIRST_PASS for the defaults and for definitions made
   before it, among them expressions without parentheses such as 0 ? 0 : 1.
-  PFFFT_DEPTH_FIRST, normalized the same way, has three cases of its own
-  at the end.
+  PFFFT_DEPTH_FIRST, normalized the same way, has three cases of its own,
+  and the 4-lane depth-first thresholds by vendor five, at the end.
 
   The header is included once per case, each time with the definitions of
   that case (the include guard, the two switches and SIMD_SZ undefined in
@@ -346,6 +346,78 @@ static const t_df_case t_df_case_3 = T_DF_CAPTURE("PFFFT_DEPTH_FIRST 1 - 1", 0);
 
 static const t_df_case* const t_df_cases[] = {&t_df_case_1, &t_df_case_2, &t_df_case_3};
 
+/* The 4-lane depth-first thresholds: the defaults by vendor, a build's
+   PFFFT_DEPTH_FIRST_MIN_BYTES for every vendor, a vendor's own value over
+   it, and a vendor's own value alone. 2 * X shows how the thresholds that
+   the header derives from a definition without parentheses group. */
+typedef struct {
+    const char* what;
+    long long other, intel, amd;             /* the values they must have */
+    long long got_other, got_intel, got_amd; /* their values */
+    long long intel_twice, amd_twice;        /* 2 * X */
+} t_thr_case;
+
+#define T_THR_CAPTURE(what, other, intel, amd)                                                                         \
+    {what,                                                                                                             \
+     other,                                                                                                            \
+     intel,                                                                                                            \
+     amd,                                                                                                              \
+     (long long)(PFFFT_DEPTH_FIRST_MIN_BYTES),                                                                         \
+     (long long)(PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL),                                                                   \
+     (long long)(PFFFT_DEPTH_FIRST_MIN_BYTES_AMD),                                                                     \
+     2 * PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL,                                                                            \
+     2 * PFFFT_DEPTH_FIRST_MIN_BYTES_AMD}
+
+#undef PFFFT_PASS_CONFIG_H
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_AMD
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE
+#include "pffft_pass_config.h"
+static const t_thr_case t_thr_case_1 = T_THR_CAPTURE("thresholds, default", 8LL << 20, 512LL << 10, 16LL << 20);
+/* and the 8-lane one */
+static const long long t_wide_default = (long long)(PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE);
+
+#undef PFFFT_PASS_CONFIG_H
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_AMD
+#define PFFFT_DEPTH_FIRST_MIN_BYTES 0
+#include "pffft_pass_config.h"
+static const t_thr_case t_thr_case_2 = T_THR_CAPTURE("thresholds, PFFFT_DEPTH_FIRST_MIN_BYTES 0", 0, 0, 0);
+
+#undef PFFFT_PASS_CONFIG_H
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_AMD
+// NOLINTNEXTLINE(bugprone-macro-parentheses) -- deliberately unparenthesized build definition.
+#define PFFFT_DEPTH_FIRST_MIN_BYTES 4096 + 4096
+#include "pffft_pass_config.h"
+static const t_thr_case t_thr_case_3 =
+    T_THR_CAPTURE("thresholds, PFFFT_DEPTH_FIRST_MIN_BYTES 4096 + 4096", 8192, 8192, 8192);
+
+#undef PFFFT_PASS_CONFIG_H
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_AMD
+#define PFFFT_DEPTH_FIRST_MIN_BYTES       0
+#define PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL 2048
+#include "pffft_pass_config.h"
+static const t_thr_case t_thr_case_4 =
+    T_THR_CAPTURE("thresholds, PFFFT_DEPTH_FIRST_MIN_BYTES 0, ..._INTEL 2048", 0, 2048, 0);
+
+#undef PFFFT_PASS_CONFIG_H
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL
+#undef PFFFT_DEPTH_FIRST_MIN_BYTES_AMD
+#define PFFFT_DEPTH_FIRST_MIN_BYTES_AMD 4096
+#include "pffft_pass_config.h"
+static const t_thr_case t_thr_case_5 =
+    T_THR_CAPTURE("thresholds, PFFFT_DEPTH_FIRST_MIN_BYTES_AMD 4096", 8LL << 20, 512LL << 10, 4096);
+
+static const t_thr_case* const t_thr_cases[] = {&t_thr_case_1, &t_thr_case_2, &t_thr_case_3, &t_thr_case_4,
+                                                &t_thr_case_5};
+
 static const t_case* const t_cases[] = {
     &t_case_1, &t_case_2, &t_case_3, &t_case_4, &t_case_5, &t_case_6, &t_case_7, &t_case_8, &t_case_9, &t_case_10,
 };
@@ -402,6 +474,27 @@ t_check_df_case(const t_df_case* c) {
     return fails;
 }
 
+/* 1 and a report line when got != expected, else 0 */
+static int
+t_ll(const char* what, const char* check, long long got, long long expected) {
+    if (got == expected) {
+        return 0;
+    }
+    printf("FAIL %s: %s is %lld, expected %lld\n", what, check, got, expected);
+    return 1;
+}
+
+static int
+t_check_thr_case(const t_thr_case* c) {
+    int fails = 0;
+    fails += t_ll(c->what, "PFFFT_DEPTH_FIRST_MIN_BYTES", c->got_other, c->other);
+    fails += t_ll(c->what, "PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL", c->got_intel, c->intel);
+    fails += t_ll(c->what, "PFFFT_DEPTH_FIRST_MIN_BYTES_AMD", c->got_amd, c->amd);
+    fails += t_ll(c->what, "2 * PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL", c->intel_twice, 2 * c->intel);
+    fails += t_ll(c->what, "2 * PFFFT_DEPTH_FIRST_MIN_BYTES_AMD", c->amd_twice, 2 * c->amd);
+    return fails;
+}
+
 int
 main(void) {
     int fails = 0;
@@ -412,11 +505,16 @@ main(void) {
     for (i = 0; i < sizeof(t_df_cases) / sizeof(t_df_cases[0]); ++i) {
         fails += t_check_df_case(t_df_cases[i]);
     }
+    fails += t_ll("thresholds, default", "PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE", t_wide_default, 32LL << 10);
+    for (i = 0; i < sizeof(t_thr_cases) / sizeof(t_thr_cases[0]); ++i) {
+        fails += t_check_thr_case(t_thr_cases[i]);
+    }
     if (fails) {
         printf("%d check(s) failed\n", fails);
         return 1;
     }
     printf("all checks passed (%d cases)\n",
-           (int)(sizeof(t_cases) / sizeof(t_cases[0]) + sizeof(t_df_cases) / sizeof(t_df_cases[0])));
+           (int)(sizeof(t_cases) / sizeof(t_cases[0]) + sizeof(t_df_cases) / sizeof(t_df_cases[0])
+                 + sizeof(t_thr_cases) / sizeof(t_thr_cases[0])));
     return 0;
 }

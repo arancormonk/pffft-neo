@@ -26,9 +26,12 @@
    (pffft_prefetch_tu.c) */
 #define PFFFT_SETUP_PF          0x100
 
-/* PFFFT_DEPTH_FIRST (pffft_pass_config.h) for a new complex setup */
+/* PFFFT_DEPTH_FIRST (pffft_pass_config.h) for a new complex setup. The
+   backends' setup functions get PFFFT_DF_AUTO only for a buffer that
+   reaches the threshold of pffft_pass_config.h for the CPU and lane count
+   (pffft_internal_new_setup() turns it into PFFFT_DF_OFF below it). */
 #define PFFFT_DF_OFF            (-1) /* never */
-#define PFFFT_DF_AUTO           0    /* by the sizes of pffft_pass_config.h, where the plan allows it */
+#define PFFFT_DF_AUTO           0    /* where the plan allows it, with the leaves of pffft_pass_config.h */
 #define PFFFT_DF_ON             1    /* wherever the plan allows it, and as deep as it allows */
 
 /*

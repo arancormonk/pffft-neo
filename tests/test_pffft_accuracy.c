@@ -819,20 +819,26 @@ main(int argc, char** argv) {
                    worst_fwd, worst_bwd, worst_conv, TOL_FFT);
             {
                 /* with 8 lanes and the default settings pffft_new_setup()
-                 schedules these depth first: slices that are leaves,
-                 deeper ones, and a plan that ends with radix 6 (4, 4, 4,
-                 4, 4, 6) */
-                static const int auto_sizes[] = {16384, 65536, 49152};
+                 schedules these depth first from 32 KiB (4096 points) on:
+                 slices that are leaves, deeper ones, and a plan that ends
+                 with radix 6 (4, 4, 4, 4, 4, 6); 2048 points stay below
+                 the threshold */
+                static const int auto_sizes[] = {2048, 4096, 16384, 65536, 49152};
                 int k;
                 worst_fwd = worst_bwd = worst_conv = 0;
                 N = test_depth_first(PFFFT_BACKEND_W8, 64, max_n);
-                for (k = 0; k < 3; ++k) {
+                for (k = 0; k < (int)(sizeof(auto_sizes) / sizeof(auto_sizes[0])); ++k) {
                     const int t = test_depth_first_size(PFFFT_BACKEND_W8, auto_sizes[k], 0);
+                    const int from_thr = 8ULL * auto_sizes[k] + 1 > t_df_min_bytes_wide;
                     N += t;
-                    /* the threshold test of pffft_df_levels; their plans
-                       start with radix-4 passes with PFFFT_TERMINAL_RADIX8 */
-                    if (t_depth_first && t_terminal_radix8 && !t && 8ULL * auto_sizes[k] + 1 > t_df_min_bytes_wide) {
+                    /* the threshold test of pffft_internal_new_setup(); the
+                       plans start with radix-4 passes with
+                       PFFFT_TERMINAL_RADIX8 */
+                    if (t_depth_first && t_terminal_radix8 && !t && from_thr) {
                         report_failure("8 lanes: not scheduled depth first", auto_sizes[k], 1, 0);
+                    }
+                    if (t && !from_thr) {
+                        report_failure("8 lanes: scheduled depth first below the threshold", auto_sizes[k], 1, 0);
                     }
                 }
                 printf("8-lane backend, depth-first schedule: tested %d COMPLEX sizes\n", N);

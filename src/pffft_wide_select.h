@@ -6,7 +6,8 @@
 /*
   Whether pffft_new_setup() uses the 8-lane AVX2 backend at a size, from the
   CPU class of pffft_x86_wide_class() and, for the inferred class, the L2
-  size. Static; pffft.c and the tests include this file.
+  size; and the depth-first threshold of the 4-lane backend by CPU vendor.
+  Static; pffft.c and the tests include this file.
 */
 
 #ifndef PFFFT_WIDE_SELECT_H
@@ -102,6 +103,21 @@ pffft_wide_default(int N, pffft_transform_t transform, int cls, unsigned long lo
             return real ? pffft_wide_in_table(pffft_wide_inferred_real_sizes, PFFFT_WIDE_INFERRED_REAL_COUNT, N)
                         : pffft_wide_in_table(pffft_wide_inferred_complex_sizes, PFFFT_WIDE_INFERRED_COMPLEX_COUNT, N);
         default: return 0;
+    }
+}
+
+/* the smallest buffer, in bytes, for the depth-first schedule of a 4-lane
+   complex setup on a CPU of vendor PFFFT_X86_VENDOR_* (pffft_pass_config.h,
+   which must be included first) */
+static unsigned long long
+pffft_df_min_bytes_native(int vendor) {
+#ifndef PFFFT_PASS_CONFIG_H
+#error "pffft_df_min_bytes_native() needs pffft_pass_config.h"
+#endif
+    switch (vendor) {
+        case PFFFT_X86_VENDOR_INTEL: return (unsigned long long)(PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL);
+        case PFFFT_X86_VENDOR_AMD: return (unsigned long long)(PFFFT_DEPTH_FIRST_MIN_BYTES_AMD);
+        default: return (unsigned long long)(PFFFT_DEPTH_FIRST_MIN_BYTES);
     }
 }
 

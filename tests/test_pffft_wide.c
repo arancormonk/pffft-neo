@@ -13,6 +13,8 @@
   - Backend selection: deterministic, sizes the backend does not handle
     stay with the 4-lane implementation, and the default picks it only at
     the measured sizes of pffft_wide_sizes.h.
+  - Depth-first threshold of the 4-lane backend: by vendor through the
+    fake operations, and at the sizes around it on this CPU.
   - Alignment: the API promises only 16-byte aligned buffers. All eight
     transform modes and every spectral operation run with each distinct
     buffer (input, second operand, output, work) at 16 mod 32 bytes or 64-byte
@@ -25,11 +27,15 @@
 #include "pffft/pffft.h"
 #include "pffft_internal.h"
 #include "pffft_cpu_x86.h"
-#include "pffft_wide_select.h"
-/* the pass schedule switches, for the plans test_wide_plan expects; the
-   8-lane backend is built only next to the 4-lane SSE one */
+/* the pass schedule switches, for the plans test_wide_plan expects and the
+   depth-first thresholds of pffft_wide_select.h; the 8-lane backend is
+   built only next to the 4-lane SSE one */
 #define SIMD_SZ 4
 #include "pffft_pass_config.h"
+#include "pffft_wide_select.h"
+static const unsigned long long t_df_min_other = (unsigned long long)(PFFFT_DEPTH_FIRST_MIN_BYTES);
+static const unsigned long long t_df_min_intel = (unsigned long long)(PFFFT_DEPTH_FIRST_MIN_BYTES_INTEL);
+static const unsigned long long t_df_min_amd = (unsigned long long)(PFFFT_DEPTH_FIRST_MIN_BYTES_AMD);
 /* N = 768 within the 8-lane radix-6 limit, evaluated while SIMD_SZ is
    defined (a limit given as an expression may use it) */
 #if 4 * 768 <= (PFFFT_REAL_RADIX6_MAX_BYTES_WIDE)
@@ -986,6 +992,126 @@ test_prefetch_setup(void) {
     }
 }
 
+/* ---------------- depth-first thresholds ---------------- */
+
+/* the threshold of pffft_df_min_bytes_native() for the vendor that a probe
+   of the fake CPU reports, whether or not the CPU can run the 8-lane
+   backend */
+static unsigned long long
+df_min_of(fake_cpu* f) {
+    pffft_x86_cpu_id id;
+    (void)probe(f, 1, &id);
+    check(!f->bad, "depth-first threshold: probe order", (int)f->max_leaf, 0);
+    return pffft_df_min_bytes_native(id.vendor);
+}
+
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(_M_ARM64EC)
+/* the schedule of the complex setup of N with these PFFFT_BACKEND_* flags:
+   1 depth first, 0 not, -1 an 8-lane setup */
+static int
+df_of(int N, int backend) {
+    PFFFT_Setup* s = pffft_internal_new_setup(N, PFFFT_COMPLEX, backend);
+    int df;
+    if (!s) {
+        check(0, "depth-first threshold: setup", N, backend);
+        return 0;
+    }
+    df = pffft_setup_simd_size(s) == 8 ? -1 : pffft_internal_depth_first_levels(s) > 0;
+    pffft_destroy_setup(s);
+    return df;
+}
+
+/* from N = 16 base 2^k on, upwards or downwards in powers of two, the
+   first size of 16 base to 2^21 points whose 4-lane plan allows the
+   depth-first schedule; 0 if none */
+static int
+df_plan_from(int N, int base, int up) {
+    for (; N >= 16 * base && N <= (1 << 21); N = up ? 2 * N : N / 2) {
+        if (df_of(N, PFFFT_BACKEND_NATIVE | PFFFT_BACKEND_DEPTH_FIRST) == 1) {
+            return N;
+        }
+    }
+    return 0;
+}
+
+/* the default schedule of N on either side of the threshold: with the
+   4-lane backend forced, and as pffft_new_setup() picks it where that is
+   the 4-lane backend (after the CPU probe of the 8-lane selection) */
+static void
+check_df_side(int N, int from_thr, unsigned long long thr) {
+    const int d = df_of(N, PFFFT_BACKEND_AUTO);
+    check(df_of(N, PFFFT_BACKEND_NATIVE) == from_thr, "depth-first threshold: 4-lane schedule", N, (int)(thr >> 10));
+    check(d < 0 || d == from_thr, "depth-first threshold: pffft_new_setup() schedule", N, (int)(thr >> 10));
+}
+
+/* on this CPU: at the sizes 2^k and 3 2^k on either side of its vendor's
+   threshold whose plans allow the depth-first schedule (on Zen 3 desktop
+   pffft_new_setup() picks 4 lanes for 3 2^19 points, 12 MiB, between the
+   AMD threshold and that of other vendors) */
+static void
+test_df_threshold_here(void) {
+    pffft_x86_cpu_ops ops;
+    pffft_x86_cpu_id id;
+    unsigned long long thr;
+    int base;
+    ops.cpuid = real_cpuid;
+    ops.xgetbv = real_xgetbv;
+    ops.ctx = NULL;
+    (void)pffft_x86_probe_wide(&ops, 0, &id);
+    thr = pffft_df_min_bytes_native(id.vendor);
+    printf("4-lane depth-first threshold %llu KiB (vendor %d), checked at N =", thr >> 10, id.vendor);
+    for (base = 1; base <= 3; base += 2) {
+        int N = 16 * base, below, above = 0;
+        while (2 * N <= (1 << 21) && 8ull * (unsigned long long)N < thr) {
+            N *= 2;
+        }
+        if (8ull * (unsigned long long)N >= thr) {
+            above = df_plan_from(N, base, 1);
+            below = df_plan_from(N / 2, base, 0);
+        } else {
+            below = df_plan_from(N, base, 0);
+        }
+        if (below) {
+            check_df_side(below, 0, thr);
+        }
+        if (above) {
+            check_df_side(above, 1, thr);
+        }
+        printf(" %d, %d", below, above);
+    }
+    printf("\n");
+}
+#endif
+
+/* The 4-lane depth-first threshold by vendor, through the fake probe; then
+   on this CPU, where the 8-lane backend runs (so that the build has the
+   CPU probe). */
+static void
+test_df_thresholds(int have_wide) {
+    const unsigned avx2 = PFFFT_X86_EBX7_AVX2 | PFFFT_X86_EBX7_BMI1 | PFFFT_X86_EBX7_BMI2;
+    fake_cpu f;
+    f = fake(intel_vendor, 0x000306C3u, ECX_ALL, avx2, 0x7, 0xd); /* Haswell */
+    check(df_min_of(&f) == t_df_min_intel, "depth-first threshold: Intel", 6, 0x3C);
+    f = fake(intel_vendor, 0x000206A7u, ECX_ALL & ~PFFFT_X86_ECX1_AVX, 0, 0x7, 0xd); /* no AVX */
+    check(df_min_of(&f) == t_df_min_intel, "depth-first threshold: Intel without AVX", 6, 0x2A);
+    f = fake(amd_vendor, 0x00A20F10u, ECX_ALL, avx2, 0x7, 0x10); /* Zen 3 */
+    check(df_min_of(&f) == t_df_min_amd, "depth-first threshold: AMD", 0x19, 0x21);
+    f = fake(amd_vendor, 0x00A20F10u, ECX_ALL, 0, 0x7, 0x10); /* no AVX2 */
+    check(df_min_of(&f) == t_df_min_amd, "depth-first threshold: AMD without AVX2", 0x19, 0x21);
+    f = fake(amd_vendor, 0x00A20F10u, ECX_ALL, avx2, 0x7, 0x10);
+    f.vendor[0] = 0x6f677948u; /* "Hygo..." */
+    check(df_min_of(&f) == t_df_min_other, "depth-first threshold: other vendor", 0x19, 0x21);
+    f = fake(intel_vendor, 0x000206A7u, ECX_ALL, avx2, 0x7, 0x6); /* max leaf 6: vendor not decoded */
+    check(df_min_of(&f) == t_df_min_other, "depth-first threshold: max leaf 6", 6, 0x2A);
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(_M_ARM64EC)
+    if (have_wide) {
+        test_df_threshold_here();
+    }
+#else
+    (void)have_wide;
+#endif
+}
+
 static void
 test_size_table(int have_wide) {
     int t, i, N;
@@ -1415,6 +1541,7 @@ main(void) {
     test_selection(have_wide);
     test_size_table(have_wide);
     test_prefetch_setup();
+    test_df_thresholds(have_wide);
     if (have_wide) {
         test_wide_plan();
         test_alignment();

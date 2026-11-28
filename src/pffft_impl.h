@@ -298,6 +298,18 @@ pffft_internal_prefetch_passes(const PFFFT_Setup* setup) {
 #define PFFFT_UNLIKELY(c) (c)
 #endif
 
+/* depth_first for a setup of N whose depth-first schedule starts at
+   buffers of min_bytes (pffft_pass_config.h): PFFFT_DF_AUTO becomes
+   PFFFT_DF_OFF for a smaller complex buffer, 8 N bytes */
+static int
+pffft_df_by_size(int N, pffft_transform_t transform, int depth_first, unsigned long long min_bytes) {
+    if (depth_first == PFFFT_DF_AUTO && transform == PFFFT_COMPLEX && N > 0
+        && (unsigned long long)N * 2 * sizeof(float) < min_bytes) {
+        return PFFFT_DF_OFF;
+    }
+    return depth_first;
+}
+
 #if PFFFT_WIDE
 
 #include "pffft_wide_select.h"
@@ -386,9 +398,10 @@ pffft_x86_xgetbv(void* ctx, unsigned index) {
 
 /* -1 if the CPU cannot run the 8-lane backend, else its PFFFT_X86_WIDE_*
    class with the build options applied; *l2 receives the L2 size the
-   inferred class needs (0 otherwise or when unknown) */
+   inferred class needs (0 otherwise or when unknown), *vendor the
+   PFFFT_X86_VENDOR_* of the CPU in either case */
 static int
-pffft_wide_cpu_class(unsigned long long* l2) {
+pffft_wide_cpu_class(unsigned long long* l2, int* vendor) {
     pffft_x86_cpu_ops ops;
     pffft_x86_cpu_id id;
     int cls;
@@ -396,7 +409,9 @@ pffft_wide_cpu_class(unsigned long long* l2) {
     ops.xgetbv = pffft_x86_xgetbv;
     ops.ctx = NULL;
     *l2 = 0;
-    if (!pffft_x86_probe_wide(&ops, PFFFT_W8_NEED_FMA, &id)) {
+    cls = pffft_x86_probe_wide(&ops, PFFFT_W8_NEED_FMA, &id);
+    *vendor = id.vendor;
+    if (!cls) {
         return -1;
     }
 #if defined(PFFFT_WIDE_UNKNOWN_CPUS)
@@ -417,28 +432,76 @@ pffft_wide_cpu_class(unsigned long long* l2) {
     return cls;
 }
 
+/* the PFFFT_X86_VENDOR_* of this CPU */
+static int
+pffft_x86_this_vendor(void) {
+    pffft_x86_cpu_ops ops;
+    pffft_x86_cpu_id id;
+    ops.cpuid = pffft_x86_cpuid;
+    ops.xgetbv = pffft_x86_xgetbv;
+    ops.ctx = NULL;
+    (void)pffft_x86_probe_wide(&ops, PFFFT_W8_NEED_FMA, &id);
+    return id.vendor;
+}
+
+/* depth_first for a 4-lane setup of N, by the threshold of the CPU's
+   vendor (pffft_df_min_bytes_native()). vendor: PFFFT_X86_VENDOR_*, or -1
+   if the CPU has not been probed yet; then it is, if the decision depends
+   on it: the default schedule of a complex setup between the smallest and
+   the largest threshold, at a size that the 8-lane backend supports.
+   pffft_wide_cpu_class() has probed those already, unless the 4-lane
+   backend was forced. The other sizes keep the other schedule: with N not
+   a multiple of 64, N / 4 has two or three factors 2, so the plan has one
+   radix-4 pass at most, and where that comes first, the plan is 4 or 4,
+   6, too short for the depth-first schedule (cfft_df_top()). */
+static int
+pffft_native_df(int N, pffft_transform_t transform, int depth_first, int vendor) {
+    if (!PFFFT_DEPTH_FIRST || depth_first != PFFFT_DF_AUTO || transform != PFFFT_COMPLEX || N <= 0) {
+        return depth_first;
+    }
+    if (vendor < 0) {
+        if (!pffft_wide_supports(N, transform)) {
+            return PFFFT_DF_OFF;
+        }
+        const unsigned long long bytes = (unsigned long long)N * 2 * sizeof(float);
+        const unsigned long long intel = pffft_df_min_bytes_native(PFFFT_X86_VENDOR_INTEL);
+        const unsigned long long amd = pffft_df_min_bytes_native(PFFFT_X86_VENDOR_AMD);
+        const unsigned long long other = pffft_df_min_bytes_native(PFFFT_X86_VENDOR_OTHER);
+        if (bytes < intel && bytes < amd && bytes < other) {
+            return PFFFT_DF_OFF;
+        }
+        if (bytes >= intel && bytes >= amd && bytes >= other) {
+            return depth_first;
+        }
+        vendor = pffft_x86_this_vendor();
+    }
+    return pffft_df_by_size(N, transform, depth_first, pffft_df_min_bytes_native(vendor));
+}
+
 PFFFT_Setup*
 pffft_internal_new_setup(int N, pffft_transform_t transform, int backend) {
     const int depth_first = pffft_backend_depth_first(backend), prefetch = pffft_backend_prefetch(backend);
+    int vendor = -1; /* PFFFT_X86_VENDOR_* once the CPU is probed */
     backend &= ~PFFFT_BACKEND_MODIFIERS;
     if (backend != PFFFT_BACKEND_NATIVE) {
         unsigned long long l2 = 0;
-        const int cls = pffft_wide_supports(N, transform) ? pffft_wide_cpu_class(&l2) : -1;
+        const int cls = pffft_wide_supports(N, transform) ? pffft_wide_cpu_class(&l2, &vendor) : -1;
+        const int w8_df = pffft_df_by_size(N, transform, depth_first, PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE);
         if (backend == PFFFT_BACKEND_W8) {
-            return cls >= 0 ? pffft_w8_new_setup(N, transform, depth_first) : NULL;
+            return cls >= 0 ? pffft_w8_new_setup(N, transform, w8_df) : NULL;
         }
         /* an allocation failure is reported, not retried with the other backend */
 #if defined(PFFFT_WIDE_ALL_SIZES)
         /* benchmarking: every supported size on every capable CPU */
         if (cls >= 0) {
-            return pffft_w8_new_setup(N, transform, depth_first);
+            return pffft_w8_new_setup(N, transform, w8_df);
         }
 #endif
         if (cls >= 0 && pffft_wide_default(N, transform, cls, l2)) {
-            return pffft_w8_new_setup(N, transform, depth_first);
+            return pffft_w8_new_setup(N, transform, w8_df);
         }
     }
-    return pffft_native_setup(N, transform, depth_first, prefetch);
+    return pffft_native_setup(N, transform, pffft_native_df(N, transform, depth_first, vendor), prefetch);
 }
 
 void
@@ -568,7 +631,9 @@ pffft_internal_new_setup(int N, pffft_transform_t transform, int backend) {
     if (backend == PFFFT_BACKEND_W8) {
         return NULL;
     }
-    return pffft_native_setup(N, transform, depth_first, prefetch);
+    /* no CPU probe: the threshold of other vendors */
+    return pffft_native_setup(N, transform, pffft_df_by_size(N, transform, depth_first, PFFFT_DEPTH_FIRST_MIN_BYTES),
+                              prefetch);
 }
 
 #endif /* PFFFT_WIDE */
