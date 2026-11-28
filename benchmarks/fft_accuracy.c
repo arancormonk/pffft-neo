@@ -655,12 +655,14 @@ parse_args(int argc, char** argv, options* opt) {
     for (b = 0; b < NUM_BACKENDS; ++b) {
         opt->selected[b] = 1;
     }
-    for (i = 1; i < argc; ++i) {
+    i = 1;
+    while (i < argc) { /* an option, or an option and its value */
         const char* arg = argv[i];
         const char* value = i + 1 < argc ? argv[i + 1] : NULL;
         int ok;
         if (strcmp(arg, "--hash-only") == 0) {
             opt->hash_only = 1;
+            ++i;
             continue;
         }
         if (!value) {
@@ -687,7 +689,7 @@ parse_args(int argc, char** argv, options* opt) {
             (void)fprintf(stderr, "invalid argument: %s %s\n", arg, value);
             return 0;
         }
-        ++i;
+        i += 2;
     }
     return 1;
 }

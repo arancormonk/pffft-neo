@@ -907,7 +907,7 @@ static NEVER_INLINE(void)
         return;
     }
 #endif
-    assert(ido % 2 == 1); /* else from terminal_merge_plan only */
+    assert(ido % 2 != 0); /* else from terminal_merge_plan only */
     for (k = 0; k < l1; k++) {
         radf3_dc(ido, l1, k, cc, ch);
     }
@@ -1022,7 +1022,7 @@ static NEVER_INLINE(void)
         return;
     }
 #endif
-    assert(ido % 2 == 1); /* else from terminal_merge_plan only */
+    assert(ido % 2 != 0); /* else from terminal_merge_plan only */
 #if PF_PREFETCH_PASSES
     if (ido == 1) { /* the DC loop alone, with its streams l1 apart */
         for (k = 0; k < l1; k++) {
@@ -1344,7 +1344,7 @@ static NEVER_INLINE(void) radf5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
         return;
     }
 #endif
-    assert(ido % 2 == 1); /* else from terminal_merge_plan only */
+    assert(ido % 2 != 0); /* else from terminal_merge_plan only */
     for (k = 1; k <= l1; ++k) {
         radf5_dc(ido, l1, k, cc, ch);
     }
@@ -1482,7 +1482,7 @@ static NEVER_INLINE(void) radb5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
         return;
     }
 #endif
-    assert(ido % 2 == 1); /* else from terminal_merge_plan only */
+    assert(ido % 2 != 0); /* else from terminal_merge_plan only */
 #if PF_PREFETCH_PASSES
     if (ido == 1) { /* the DC loop alone, with its streams l1 apart */
         for (k = 1; k <= l1; ++k) {
