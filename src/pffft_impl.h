@@ -208,6 +208,13 @@ pffft_internal_depth_first_levels(const PFFFT_Setup* setup) {
     return setup->df_levels;
 }
 
+const int*
+pffft_internal_plan(const PFFFT_Setup* setup, int* count) {
+    /* ifac: N, the number of passes, their radices */
+    *count = setup->ifac[1];
+    return setup->ifac + 2;
+}
+
 /* the PFFFT_DF_* value of the PFFFT_BACKEND_* flags */
 static int
 pffft_backend_depth_first(int backend) {

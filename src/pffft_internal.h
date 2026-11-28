@@ -48,6 +48,14 @@ PFFFT_EXPORT PFFFT_Setup* pffft_internal_new_setup(int N, pffft_transform_t tran
    1 + the number of depth-first passes within a slice */
 PFFFT_EXPORT int pffft_internal_depth_first_levels(const PFFFT_Setup* setup);
 
+/* the radices of the setup's passes in the order the plan stores them
+   (ifac), which is not always the order they run in (real forward
+   transforms run them in reverse, depth-first ones by slice). *count gets
+   their number. PFFFT_INTERNAL_HAS_PLAN tells a tool built against several
+   revisions of the library that it is there. */
+#define PFFFT_INTERNAL_HAS_PLAN 1
+PFFFT_EXPORT const int* pffft_internal_plan(const PFFFT_Setup* setup, int* count);
+
 #ifdef __cplusplus
 }
 #endif

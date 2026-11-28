@@ -18,6 +18,16 @@ foreach(
 endforeach()
 add_test(NAME test_pffft_simd_macros COMMAND test_pffft_float --test-simd)
 
+# The accuracy A/B driver of benchmarks/, built here too so that every
+# configuration compiles and runs it.
+add_executable(test_fft_accuracy ../benchmarks/fft_accuracy.c)
+target_link_libraries(test_fft_accuracy PRIVATE PFFFT)
+target_include_directories(test_fft_accuracy PRIVATE ../src .)
+add_test(
+    NAME fft_accuracy_smoke
+    COMMAND test_fft_accuracy --max 320 --seeds 1
+)
+
 if(NOT WIN32)
     find_package(Threads)
     if(Threads_FOUND)

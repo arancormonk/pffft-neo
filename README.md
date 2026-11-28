@@ -69,6 +69,41 @@ For dispatch-table research, build the same revision twice, with
 with `--labels native4 wide --operations all` and at least three samples per
 case. Inspect the CSV with `python3 tools/wide_size_table.py --report build/comparison.csv`.
 
+## Compare FFT accuracy
+
+`benchmarks/` also builds `fft_accuracy`, which measures every transform
+against a long-double reference DFT and hashes the results. Configure the two
+build trees as for the timing comparison (or reuse them), then run
+
+```sh
+cmake --build build/bench-base --target fft_accuracy
+cmake --build build/bench-candidate --target fft_accuracy
+python3 tools/accuracy_compare.py build/bench-base/fft_accuracy build/bench-candidate/fft_accuracy
+```
+
+Both builds get the same inputs: for each real and complex size up to
+`--max` (default 65536), 2 seeds (`--seeds`, `--seed-base`) of at least 8192
+points each. Each size runs on the native lanes, on the 8-lane backend where
+the build and CPU have it (forced, whatever the dispatch tables say), with
+the forced depth-first and breadth-first schedules where they apply, and as
+`pffft_new_setup()` picks (`--backends`). A case is a backend, kind, size,
+direction and ordering. The report lists which cases give the same bits (a
+hash of inputs and outputs) and, for the others, the pass factors and the
+pooled relative RMS errors of both builds.
+
+The comparison fails on a check within a build (in place, `zreorder`, finite
+output, the test suite's error limit), on cases the candidate lost (rows of
+a forced schedule, which depend on the plan, only if `--backends` asks for
+them), or if the candidate's error over the baseline's exceeds 1.05 at one
+case (`--case-tol`) or 1.01 as the geometric mean over the sizes of a
+backend, kind and direction, or over its powers of two or its sizes with a
+factor 3, 5 or 15 (`--class-tol`). With other seeds a case's ratio moves by
+0.4% in the median and at most 3%, a class mean by under 0.3%. `--bits`
+requires every case to be bit-identical, for changes that should only move
+data; `--hash-only` skips the reference. `--output` writes every case to a
+CSV. The default run takes seconds; `--max 1048576`, which reaches the
+native depth-first schedule, about 1.5 minutes on 32 threads (`--jobs`).
+
 ## License
 
 Copyright (C) 2026 by arancormonk. Starting November 22, 2026, arancormonk's
