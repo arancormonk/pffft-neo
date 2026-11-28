@@ -12,7 +12,8 @@
     No stand-alone radix-2 pass: where a plan has a radix-2 and a radix-4
     pass, the pair is replaced by one twiddle-free radix-8 pass, the one
     with one element per leg (complex factors 2, ..., 4 become ..., 8; real
-    power-of-two factors 2, 4, ..., 4 become 4, ..., 8). One pass fewer
+    factors 2, 4, ..., 3..., 5... become 4..., 3..., 5..., 8, the 3s and
+    5s then with an even ido). One pass fewer
     over the data; results differ in the last bits at the sizes whose plan
     changes.
 

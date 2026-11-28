@@ -679,16 +679,23 @@ main(int argc, char** argv) {
         printf("tests for pffft_is_power_of_two() succeeded successfully.\n");
     }
 
-    /* powers of two exercise only the radix-2/4 codelets. The remaining
-     sizes cover radix-3 and radix-5 in every position the factorization
-     order {4,2,3,5} can put them: 3*2^k (96, 192), 5*2^k (160), 9*2^k
-     (288, 576, 1152), 15*2^k (480), 25*2^k (800), 81*32 (2592), 125*32
-     (4000) and 375*32 (12000). All are multiples of 32, so they are
-     valid REAL and COMPLEX sizes for every SIMD_SZ. */
+    /* powers of two exercise only the radix-2/4 codelets, and with
+     PFFFT_TERMINAL_RADIX8 the radix-8 ones where the per-lane length has
+     an odd power of two. The remaining sizes cover radix-3 and radix-5 in
+     every position the factorization order {4,2,3,5} can put them: 3*2^k
+     (96, 192), 5*2^k (160), 9*2^k (288, 576, 1152), 15*2^k (480, 1920,
+     3840), 25*2^k (800), 81*32 (2592), 125*32 (4000) and 375*2^k (12000,
+     48000). Where the per-lane length has an odd power of two, at least
+     8, the real transform puts the radix-8 pass after the 3s and 5s,
+     which then have an even ido: with 4 lanes at 96 but not 192, 1920
+     but not 3840, and at 48000; where pffft_new_setup() picks the 8-lane
+     backend (real N a multiple of 128 in its size table), at 3840 but not
+     1920. All are multiples of 32, so they are valid REAL and COMPLEX
+     sizes for every SIMD_SZ. */
     {
         static const int sizes[] = {
-            32, 64,  128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
-            96, 160, 192, 288, 480, 576,  800,  1152, 2592, 4000,  12000,
+            32,  64,  128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 96,
+            160, 192, 288, 480, 576, 800,  1152, 1920, 2592, 3840,  4000,  12000, 48000,
         };
         resFFT = 0;
         for (i = 0; i < (int)(sizeof(sizes) / sizeof(sizes[0])); ++i) {

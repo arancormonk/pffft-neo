@@ -42,13 +42,21 @@ T_NAME(expected_plan)(int n, int cplx, int* f) {
         f[k] = ifac[2 + k];
     }
 #if PFFFT_TERMINAL_RADIX8
-    /* 2, ..., 4: drop the 2, the last 4 becomes an 8 */
-    if (nf >= 2 && f[0] == 2 && f[nf - 1] == 4) {
-        for (k = 1; k < nf; ++k) {
-            f[k - 1] = f[k];
+    /* a 2 first and a 4: drop both, the rest in order, then an 8 */
+    if (nf >= 2 && f[0] == 2) {
+        int j = 1, m = 0;
+        while (j < nf && f[j] != 4) {
+            ++j;
         }
-        --nf;
-        f[nf - 1] = 8;
+        if (j < nf) {
+            for (k = 1; k < nf; ++k) {
+                if (k != j) {
+                    f[m++] = f[k];
+                }
+            }
+            f[m] = 8;
+            nf = m + 1;
+        }
     }
 #else
     /* the single radix-8 pass of complex n == 8 */
@@ -81,7 +89,7 @@ T_NAME(check_plan)(int n, int cplx, const int* ifac, int nf) {
         /* independent of E: the 8 is the pass with one element per leg, and
        no stand-alone radix-2 pass is left where a radix-4 pass could
        absorb it */
-        int has2 = 0, has4 = 0, has8 = 0, last = ifac[1] > 0 ? ifac[1 + ifac[1]] : 0;
+        int has2 = 0, has4 = 0, has8 = 0;
         for (k = 0; k < ifac[1]; ++k) {
             has2 |= ifac[2 + k] == 2;
             has4 |= ifac[2 + k] == 4;
@@ -89,11 +97,7 @@ T_NAME(check_plan)(int n, int cplx, const int* ifac, int nf) {
             fails += T_CHECK(ifac[2 + k] != 8 || k == ifac[1] - 1);
         }
         fails += T_CHECK(!(has2 && has8));
-        if (cplx) {
-            fails += T_CHECK(!(has2 && has4));
-        } else {
-            fails += T_CHECK(!(has2 && has4) || last == 3 || last == 5);
-        }
+        fails += T_CHECK(!(has2 && has4));
     }
 #endif
     if (fails) {
@@ -275,6 +279,139 @@ done:
     return fails;
 }
 #endif /* PFFFT_TERMINAL_RADIX8 */
+
+/* the half-complex real DFT (FFTPACK's layout) of x[0], x[stride], ...,
+   L values, in double */
+static void
+T_NAME(hc_dft)(const double* x, int L, int stride, double* hc) {
+    int f, t;
+    for (f = 0; 2 * f <= L; ++f) {
+        double re = 0, im = 0;
+        for (t = 0; t < L; ++t) {
+            const double a = 2 * M_PI * (double)((long)f * t % L) / L;
+            re += x[t * stride] * cos(a);
+            im -= x[t * stride] * sin(a);
+        }
+        if (f == 0) {
+            hc[0] = re;
+        } else if (2 * f == L) {
+            hc[L - 1] = re;
+        } else {
+            hc[2 * f - 1] = re;
+            hc[(ptrdiff_t)2 * f] = im;
+        }
+    }
+}
+
+/* The real radix-3 and radix-5 passes, one pass at a time, against a DFT
+   in double, for odd and (with PFFFT_TERMINAL_RADIX8, the only plans that
+   give them one) even ido: an even ido adds the Nyquist elements, and
+   ido == 2 has only those and the DC elements. Group k of a pass of
+   radix p holds the spectra Y_j, of length ido, of z[j], z[j + p], ... for
+   a real z of length L = p*ido: forward they go to the spectrum X of z,
+   and backward X goes to p Y_j (unscaled, as all passes). */
+static int
+T_NAME(test_real_odd_radix)(void) {
+#if PFFFT_TERMINAL_RADIX8
+    static const int idos[] = {1, 2, 3, 4, 5, 6, 8, 10, 16};
+#else
+    static const int idos[] = {1, 3, 5, 7, 9, 15};
+#endif
+    static const int l1s[] = {1, 3};
+
+    enum { IMAX = 16, PMAX = 5, LMAX = 3 };
+
+    const int V = T_LANES;
+    const size_t nf = (size_t)PMAX * IMAX * LMAX * V; /* floats per buffer */
+    float *cc = t_alloc(nf), *ch = t_alloc(nf), *wa = t_alloc((size_t)(PMAX - 1) * IMAX),
+          *r = t_alloc((size_t)PMAX * IMAX);
+    double *want = (double*)malloc(nf * sizeof(double)), z[PMAX * IMAX], X[PMAX * IMAX], Y[PMAX * IMAX];
+    const float* w[PMAX - 1];
+    int fails = 0, p, ii, il, dir;
+    if (!cc || !ch || !wa || !r || !want) {
+        fails += T_CHECK(cc && ch && wa && r && want);
+        goto done;
+    }
+    for (p = 0; p < PMAX - 1; ++p) {
+        w[p] = wa + (ptrdiff_t)p * IMAX;
+    }
+    for (p = 3; p <= 5; p += 2) {
+        for (ii = 0; ii < (int)(sizeof(idos) / sizeof(idos[0])); ++ii) {
+            const int ido = idos[ii], L = p * ido;
+            int j, f;
+            /* the twiddles of leg j as rffti1_ps stores them: cos and sin
+               of 2 pi j f/L, f = 1 .. (ido-1)/2 (the forward pass takes
+               their conjugates) */
+            for (j = 1; j < p; ++j) {
+                for (f = 1; 2 * f < ido; ++f) {
+                    T_FN(twiddle_cos_sin)(j * f, L, &wa[(ptrdiff_t)(j - 1) * IMAX + (ptrdiff_t)2 * f - 2],
+                                          &wa[(ptrdiff_t)(j - 1) * IMAX + (ptrdiff_t)2 * f - 1]);
+                }
+            }
+            for (il = 0; il < (int)(sizeof(l1s) / sizeof(l1s[0])); ++il) {
+                const int l1 = l1s[il];
+                for (dir = 0; dir < 2; ++dir) {
+                    int k, l, i, bad = 0;
+                    double worst = 0;
+                    for (k = 0; k < l1; ++k) {
+                        for (l = 0; l < V; ++l) {
+                            t_fill(r, (size_t)L);
+                            for (i = 0; i < L; ++i) {
+                                z[i] = r[i];
+                            }
+                            T_NAME(hc_dft)(z, L, 1, X);
+                            for (j = 0; j < p; ++j) {
+                                T_NAME(hc_dft)(z + j, ido, p, Y + (ptrdiff_t)j * ido);
+                            }
+                            for (j = 0; j < p; ++j) {
+                                for (i = 0; i < ido; ++i) {
+                                    const size_t leg = ((size_t)(k + j * l1) * ido + i) * V + l;
+                                    const size_t blk = ((size_t)k * L + (size_t)j * ido + i) * V + l;
+                                    if (dir == 0) {
+                                        cc[leg] = (float)Y[j * ido + i];
+                                        want[blk] = X[j * ido + i];
+                                    } else {
+                                        cc[blk] = (float)X[j * ido + i];
+                                        want[leg] = p * Y[j * ido + i];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (p == 3) {
+                        if (dir == 0) {
+                            T_FN(radf3_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1]);
+                        } else {
+                            T_FN(radb3_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1]);
+                        }
+                    } else if (dir == 0) {
+                        T_FN(radf5_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1], w[2], w[3]);
+                    } else {
+                        T_FN(radb5_ps)(ido, l1, (const T_V*)cc, (T_V*)ch, w[0], w[1], w[2], w[3]);
+                    }
+                    /* |X| and |p Y| are at most L */
+                    for (i = 0; i < l1 * L * V; ++i) {
+                        const double e = fabs(ch[i] - want[i]) / L;
+                        worst = t_max_err(worst, e);
+                        bad += !t_within(e, 8 * T_EPS);
+                    }
+                    if (bad) {
+                        printf("  (rad%c%d_ps: ido %d, l1 %d: %d values off, worst %.3g eps)\n", dir ? 'b' : 'f', p,
+                               ido, l1, bad, worst / T_EPS);
+                    }
+                    fails += T_CHECK(bad == 0);
+                }
+            }
+        }
+    }
+done:
+    t_free(cc);
+    t_free(ch);
+    t_free(wa);
+    t_free(r);
+    free(want);
+    return fails;
+}
 
 #if PFFFT_TERMINAL_RADIX8 && T_FUSED
 /* passf8_ol_ps: the bits of passf8_ps, interleaved as PF_INTERLEAVE2 does */
@@ -740,6 +877,7 @@ T_NAME(run_backend_tests)(void) {
     /* the macro contract: T_LANES floats in one T_V */
     fails += T_CHECK(sizeof(T_V) == T_LANES * sizeof(float));
     fails += T_NAME(test_plan_rule)();
+    fails += T_NAME(test_real_odd_radix)();
 #if PFFFT_TERMINAL_RADIX8
     fails += T_NAME(test_radix8_complex)();
     fails += T_NAME(test_radix8_real)();

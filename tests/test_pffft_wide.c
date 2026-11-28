@@ -1100,7 +1100,7 @@ done:
 static void
 test_alignment(void) {
     static const int complex_sizes[] = {64, 192, 320, 1024, 1536, 4096};
-    static const int real_sizes[] = {128, 384, 640, 2048, 3072, 8192};
+    static const int real_sizes[] = {128, 384, 640, 2048, 3072, 3840, 8192};
     size_t i;
     for (i = 0; i < sizeof complex_sizes / sizeof complex_sizes[0]; ++i) {
         test_alignment_size(complex_sizes[i], PFFFT_COMPLEX);

@@ -145,13 +145,21 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define passf8_op_body       pffft_w8_passf8_op_body
 #define radf2_ps             pffft_w8_radf2_ps
 #define radb2_ps             pffft_w8_radb2_ps
+#define radf3_dc             pffft_w8_radf3_dc
+#define radf3_rows           pffft_w8_radf3_rows
 #define radf3_ps             pffft_w8_radf3_ps
+#define radb3_dc             pffft_w8_radb3_dc
+#define radb3_rows           pffft_w8_radb3_rows
 #define radb3_ps             pffft_w8_radb3_ps
 #define radf4_groups         pffft_w8_radf4_groups
 #define radf4_ps             pffft_w8_radf4_ps
 #define radb4_groups         pffft_w8_radb4_groups
 #define radb4_ps             pffft_w8_radb4_ps
+#define radf5_dc             pffft_w8_radf5_dc
+#define radf5_rows           pffft_w8_radf5_rows
 #define radf5_ps             pffft_w8_radf5_ps
+#define radb5_dc             pffft_w8_radb5_dc
+#define radb5_rows           pffft_w8_radb5_rows
 #define radb5_ps             pffft_w8_radb5_ps
 #define radf8_ps             pffft_w8_radf8_ps
 #define radb8_ps             pffft_w8_radb8_ps
@@ -1277,13 +1285,21 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform, in
 #undef radf2_ps
 #undef radb2_ps
 #undef radf3_ps
+#undef radf3_dc
+#undef radf3_rows
 #undef radb3_ps
+#undef radb3_dc
+#undef radb3_rows
 #undef radf4_ps
 #undef radf4_groups
 #undef radb4_ps
 #undef radb4_groups
 #undef radf5_ps
+#undef radf5_dc
+#undef radf5_rows
 #undef radb5_ps
+#undef radb5_dc
+#undef radb5_rows
 #undef radf8_ps
 #undef radb8_ps
 #undef rfftf1_ps
