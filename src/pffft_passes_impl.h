@@ -1420,6 +1420,49 @@ static NEVER_INLINE(void) radb8_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
     int k;
     assert(ido == 1);
     (void)ido; /* otherwise unused when assertions are disabled */
+    if ((((size_t)l1 * sizeof(v4sf)) & 4095) == 0) {
+        /* The 8 output streams, l1 vectors apart, start at one offset
+           within 4 KiB: a level-1 data cache of 32 KiB and 8 ways maps
+           them to one set, and x86 cores tell stores from loads by the
+           low 12 address bits first. The loop below then took 1.8 times
+           as long per vector as at the neighbouring strides on Zen 3 (2.1
+           times with 8 lanes) and 1.9 times on Haswell, with more
+           requests for lines to write: they leave the cache before they
+           are complete. Real lengths with a lone factor 2 and N/2 bytes a
+           multiple of 4096 have such strides, the powers of two from N =
+           8192 (4 lanes) among them. Here the pass writes the even
+           outputs in one sweep and the odd ones in a second, four
+           streams each, which took 1.1 times as long as the neighbours
+           on Zen 3 (1.5 with 8 lanes) and 1.4 on Haswell, in the level-2
+           cache. Each output gets the operations of the loop
+           below, so the results keep their bits. The pass reads its
+           input twice, which costs more than it saves at other strides
+           (7% with 4 lanes, 50% with 8). */
+        const v4sf* c0 = cc;
+        v4sf* h0 = ch;
+        for (k = 0; k < l1; ++k, cc += 8, ++ch) {
+            v4sf r0 = VLD(cc, 0), r1 = VLD(cc, 1), i1 = VLD(cc, 2), r2 = VLD(cc, 3);
+            v4sf r3 = VLD(cc, 5), i3 = VLD(cc, 6), r4 = VLD(cc, 7);
+            v4sf p = VADD(r0, r4), a = VADD(r1, r3), c = VSUB(i3, i1);
+            v4sf e0 = VMADD(two, r2, p), e2 = VMSUB(two, r2, p);
+            VST(ch, 0, VMADD(two, a, e0));
+            VST(ch, 4 * l1, VMSUB(two, a, e0));
+            VST(ch, 2 * l1, VMADD(two, c, e2));
+            VST(ch, 6 * l1, VMSUB(two, c, e2));
+        }
+        for (cc = c0, ch = h0, k = 0; k < l1; ++k, cc += 8, ++ch) {
+            v4sf r0 = VLD(cc, 0), r1 = VLD(cc, 1), i1 = VLD(cc, 2);
+            v4sf i2 = VLD(cc, 4), r3 = VLD(cc, 5), i3 = VLD(cc, 6), r4 = VLD(cc, 7);
+            v4sf q = VSUB(r0, r4), b = VSUB(r1, r3), d = VADD(i1, i3);
+            v4sf e1 = VMSUB(two, i2, q), e3 = VMADD(two, i2, q);
+            v4sf f1 = VSUB(b, d), f3 = VADD(b, d);
+            VST(ch, 1 * l1, VMADD(sq2, f1, e1));
+            VST(ch, 5 * l1, VMSUB(sq2, f1, e1));
+            VST(ch, 3 * l1, VMSUB(sq2, f3, e3));
+            VST(ch, 7 * l1, VMADD(sq2, f3, e3));
+        }
+        return;
+    }
     for (k = 0; k < l1; ++k, cc += 8, ++ch) {
         v4sf r0 = VLD(cc, 0), r1 = VLD(cc, 1), i1 = VLD(cc, 2), r2 = VLD(cc, 3);
         v4sf i2 = VLD(cc, 4), r3 = VLD(cc, 5), i3 = VLD(cc, 6), r4 = VLD(cc, 7);

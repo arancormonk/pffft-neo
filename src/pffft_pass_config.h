@@ -90,9 +90,10 @@
    is Haswell's crossover. With 8 lanes (Zen 3) it was -2 to +3% forward
    and 0 to 5% less backward in cache: not a clear win, so off. (Both
    lane counts on Zen 3 also ran the backward transform up to 10% faster
-   where N/2 bytes is a multiple of 4096, probably because there the 8
-   output streams of radb8_ps, l1 vectors apart, fall into one cache set;
-   not measured in isolation.) */
+   where N/2 bytes is a multiple of 4096: there the 8 output streams of
+   radb8_ps, l1 vectors apart, fall into one cache set; radb8_ps now
+   writes four of them at a time there, and these measurements predate
+   that.) */
 #ifndef PFFFT_REAL_RADIX6_MAX_BYTES
 #define PFFFT_REAL_RADIX6_MAX_BYTES 16384
 #endif

@@ -285,11 +285,14 @@ done:
 }
 
 /* real radix 8 at ido == 1: radf8_ps and radb8_ps against the radix-4 and
-   radix-2 passes they replace, block by block */
+   radix-2 passes they replace, block by block. radb8_ps writes its output
+   in two sweeps where its streams, l1 vectors apart, are a multiple of 4
+   KiB apart: l1 = 256 and 1024 with 4 lanes (16-byte vectors) or 8, 1024
+   with one; T_NAME(test_radb8_sweeps) checks their bits. */
 static int
 T_NAME(test_radix8_real)(void) {
-    static const int l1s[] = {1, 2, 3, 4, 5, 16, 64, 256};
-    const int lmax = 256, V = T_LANES;
+    static const int l1s[] = {1, 2, 3, 4, 5, 16, 64, 255, 256, 1024};
+    const int lmax = 1024, V = T_LANES;
     float *cc = t_alloc((size_t)8 * lmax * V), *ch = t_alloc((size_t)8 * lmax * V);
     float *x = t_alloc((size_t)8 * V), *t = t_alloc((size_t)8 * V), *y = t_alloc((size_t)8 * V), wa[7] = {0};
     int fails = 0, il;
@@ -352,6 +355,43 @@ done:
     t_free(y);
     return fails;
 }
+
+/* radb8_ps at the l1 where it writes in two sweeps (l1 vectors a multiple
+   of 4 KiB) against the single sweep at l1 + 1, whose first l1 groups have
+   the same input: the same bits. */
+static int
+T_NAME(test_radb8_sweeps)(void) {
+    const int V = T_LANES, l1 = (int)(4096 / sizeof(T_V)), l2 = l1 + 1;
+    float *cc = t_alloc((size_t)8 * l2 * V), *ch = t_alloc((size_t)8 * l2 * V), *cg = t_alloc((size_t)8 * l2 * V);
+    int fails = 0, k, j, l, bad = 0;
+    if (!cc || !ch || !cg) {
+        fails += T_CHECK(cc && ch && cg);
+        goto done;
+    }
+    t_fill(cc, (size_t)8 * l2 * V);
+    T_FN(radb8_ps)(1, l1, (const T_V*)cc, (T_V*)ch);
+    T_FN(radb8_ps)(1, l2, (const T_V*)cc, (T_V*)cg);
+    for (k = 0; k < l1; ++k) {
+        for (j = 0; j < 8; ++j) {
+            for (l = 0; l < V; ++l) {
+                unsigned a, b; /* the bits */
+                memcpy(&a, &ch[(k + j * l1) * V + l], sizeof a);
+                memcpy(&b, &cg[(k + j * l2) * V + l], sizeof b);
+                bad += a != b;
+            }
+        }
+    }
+    if (bad) {
+        printf("  (radb8_ps: two sweeps at l1 %d: %d values differ from one sweep)\n", l1, bad);
+    }
+    fails += T_CHECK(bad == 0);
+done:
+    t_free(cc);
+    t_free(ch);
+    t_free(cg);
+    return fails;
+}
+
 #endif /* PFFFT_TERMINAL_RADIX8 */
 
 /* the half-complex real DFT (FFTPACK's layout) of x[0], x[stride], ...,
@@ -982,6 +1022,7 @@ T_NAME(run_backend_tests)(void) {
     fails += T_NAME(test_radix8_complex)();
     fails += T_NAME(test_radix6_complex)();
     fails += T_NAME(test_radix8_real)();
+    fails += T_NAME(test_radb8_sweeps)();
 #endif
 #if PFFFT_TERMINAL_RADIX8 && T_FUSED
     fails += T_NAME(test_radix8_complex_ol)();
