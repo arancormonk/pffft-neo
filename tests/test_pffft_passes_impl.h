@@ -30,13 +30,14 @@
 */
 
 #if PFFFT_TERMINAL_RADIX8
-/* whether a real plan of per-lane length n may take the radix-6 merge:
-   an array of 4 N = 4 n T_LANES bytes within this lane count's limit */
+/* whether a plan of per-lane length n may take the radix-6 merge: any
+   complex one, a real one with an array of 4 N = 4 n T_LANES bytes
+   within this lane count's limit */
 static int
-T_NAME(real_radix6)(int n) {
+T_NAME(radix6)(int n, int cplx) {
     const unsigned long long limit = T_LANES == 8 ? (unsigned long long)(PFFFT_REAL_RADIX6_MAX_BYTES_WIDE)
                                                   : (unsigned long long)(PFFFT_REAL_RADIX6_MAX_BYTES);
-    return 4ULL * T_LANES * (unsigned long long)n <= limit;
+    return cplx || 4ULL * T_LANES * (unsigned long long)n <= limit;
 }
 #endif
 
@@ -53,7 +54,7 @@ T_NAME(expected_plan)(int n, int cplx, int* f) {
         f[k] = ifac[2 + k];
     }
 #if PFFFT_TERMINAL_RADIX8
-    /* a 2 first and, for a real plan within the radix-6 limit, a 3: drop
+    /* a 2 first and, for a plan within the radix-6 limit, a 3: drop
        both, the rest in order, then a 6; else a 2 first and a 4: the same
        with an 8 */
     if (nf >= 2 && f[0] == 2) {
@@ -61,7 +62,7 @@ T_NAME(expected_plan)(int n, int cplx, int* f) {
         while (j < nf && f[j] != 3) {
             ++j;
         }
-        if (cplx || !T_NAME(real_radix6)(n) || j == nf) {
+        if (!T_NAME(radix6)(n, cplx) || j == nf) {
             merged = 8;
             j = 1;
             while (j < nf && f[j] != 4) {
@@ -108,9 +109,9 @@ T_NAME(check_plan)(int n, int cplx, const int* ifac, int nf) {
     {
         /* independent of E: the 8 or 6 is the pass with one element per
        leg, and no stand-alone radix-2 pass is left where a radix-4 pass
-       (or, for a real plan within the radix-6 limit, a radix-3 one) could
+       (or, for a plan within the radix-6 limit, a radix-3 one) could
        absorb it; a 6 only there, an 8 there only without a 3 */
-        const int r6 = !cplx && T_NAME(real_radix6)(n);
+        const int r6 = T_NAME(radix6)(n, cplx);
         int has2 = 0, has3 = 0, has4 = 0, has6 = 0, has8 = 0;
         for (k = 0; k < ifac[1]; ++k) {
             has2 |= ifac[2 + k] == 2;
@@ -170,7 +171,7 @@ T_NAME(test_plan_rule)(void) {
                     continue;
                 }
                 T_FN(decompose)(n, ifac, cplx ? cplx_try : real_try);
-                nf = T_FN(terminal_merge_plan)(ifac, !cplx && T_NAME(real_radix6)(n));
+                nf = T_FN(terminal_merge_plan)(ifac, T_NAME(radix6)(n, cplx));
                 fails += T_NAME(check_plan)(n, cplx, ifac, nf);
             }
         }
@@ -181,6 +182,52 @@ T_NAME(test_plan_rule)(void) {
 }
 
 #if PFFFT_TERMINAL_RADIX8
+/* complex radix 6 at one element per leg: passf6_ps against the 6-point
+   DFT in double, exp(fsign 2 pi i j m/6), unscaled, group by group */
+static int
+T_NAME(test_radix6_complex)(void) {
+    static const int l1s[] = {1, 2, 3, 7};
+    const int lmax = 7, V = T_LANES;
+    float *cc = t_alloc((size_t)12 * lmax * V), *ch = t_alloc((size_t)12 * lmax * V);
+    int fails = 0, s, il;
+    if (!cc || !ch) {
+        fails += T_CHECK(cc && ch);
+        goto done;
+    }
+    for (s = 0; s < 2; ++s) {
+        const float fsign = s ? 1.f : -1.f;
+        for (il = 0; il < (int)(sizeof(l1s) / sizeof(l1s[0])); ++il) {
+            const int l1 = l1s[il];
+            int k, m, j, l, bad = 0;
+            t_fill(cc, (size_t)12 * l1 * V);
+            T_FN(passf6_ps)(2, l1, (const T_V*)cc, (T_V*)ch, fsign);
+            for (k = 0; k < l1; ++k) {
+                for (m = 0; m < 6; ++m) {
+                    for (l = 0; l < V; ++l) {
+                        double yr = 0, yi = 0;
+                        for (j = 0; j < 6; ++j) {
+                            const double a = fsign * 2 * M_PI * ((j * m) % 6) / 6;
+                            const double xr = cc[(12 * k + 2 * j) * V + l], xi = cc[(12 * k + 2 * j + 1) * V + l];
+                            yr += xr * cos(a) - xi * sin(a);
+                            yi += xr * sin(a) + xi * cos(a);
+                        }
+                        bad += !t_within(fabs(ch[(2 * (k + m * l1)) * V + l] - yr), 16 * T_EPS);
+                        bad += !t_within(fabs(ch[(2 * (k + m * l1) + 1) * V + l] - yi), 16 * T_EPS);
+                    }
+                }
+            }
+            if (bad) {
+                printf("  (passf6_ps: fsign %+g, l1 %d: %d values off)\n", fsign, l1, bad);
+            }
+            fails += T_CHECK(bad == 0);
+        }
+    }
+done:
+    t_free(cc);
+    t_free(ch);
+    return fails;
+}
+
 /* complex radix 8 at one element per leg: passf8_ps against the radix-2
    pass and the radix-4 pass it replaces, block by block */
 static int
@@ -458,65 +505,73 @@ done:
 }
 
 #if PFFFT_TERMINAL_RADIX8 && T_FUSED
-/* passf8_ol_ps: the bits of passf8_ps, interleaved as PF_INTERLEAVE2 does */
+/* passf8_ol_ps and passf6_ol_ps: the bits of passf8_ps and passf6_ps,
+   interleaved as PF_INTERLEAVE2 does */
 static int
 T_NAME(test_radix8_complex_ol)(void) {
     static const int l1s[] = {1, 2, 3, 4, 5, 16, 60};
     const int lmax = 60, V = T_LANES;
     float *cc = t_alloc((size_t)16 * lmax * V), *ch = t_alloc((size_t)16 * lmax * V),
           *out = t_alloc((size_t)16 * lmax * V);
-    int fails = 0, s, il;
+    int fails = 0, s, il, R;
     if (!cc || !ch || !out) {
         fails += T_CHECK(cc && ch && out);
         goto done;
     }
-    for (s = 0; s < 2; ++s) {
-        const float fsign = s ? 1.f : -1.f;
-        for (il = 0; il < (int)(sizeof(l1s) / sizeof(l1s[0])); ++il) {
-            const int l1 = l1s[il];
-            int p, bad = 0;
-            t_fill(cc, (size_t)16 * l1 * V);
-            T_FN(passf8_ps)(2, l1, (const T_V*)cc, (T_V*)ch, fsign);
-            T_FN(passf8_ol_ps)(l1, (const T_V*)cc, (T_V*)out, fsign);
-            for (p = 0; p < 8 * l1; ++p) {
-                const float *a = ch + (ptrdiff_t)2 * p * V, *b = a + V;
-                float want[16];
-                /* 4 lanes: a0 b0 a1 b1 | a2 b2 a3 b3;
-           8 lanes: a0 b0 a1 b1 a4 b4 a5 b5 | a2 b2 a3 b3 a6 b6 a7 b7 */
-                if (V == 4) {
-                    want[0] = a[0];
-                    want[1] = b[0];
-                    want[2] = a[1];
-                    want[3] = b[1];
-                    want[4] = a[2];
-                    want[5] = b[2];
-                    want[6] = a[3];
-                    want[7] = b[3];
+    for (R = 8; R >= 6; R -= 2) {
+        for (s = 0; s < 2; ++s) {
+            const float fsign = s ? 1.f : -1.f;
+            for (il = 0; il < (int)(sizeof(l1s) / sizeof(l1s[0])); ++il) {
+                const int l1 = l1s[il];
+                int p, bad = 0;
+                t_fill(cc, (size_t)16 * l1 * V);
+                if (R == 8) {
+                    T_FN(passf8_ps)(2, l1, (const T_V*)cc, (T_V*)ch, fsign);
+                    T_FN(passf8_ol_ps)(l1, (const T_V*)cc, (T_V*)out, fsign);
                 } else {
-                    want[0] = a[0];
-                    want[1] = b[0];
-                    want[2] = a[1];
-                    want[3] = b[1];
-                    want[4] = a[4];
-                    want[5] = b[4];
-                    want[6] = a[5];
-                    want[7] = b[5];
-                    want[8] = a[2];
-                    want[9] = b[2];
-                    want[10] = a[3];
-                    want[11] = b[3];
-                    want[12] = a[6];
-                    want[13] = b[6];
-                    want[14] = a[7];
-                    want[15] = b[7];
+                    T_FN(passf6_ps)(2, l1, (const T_V*)cc, (T_V*)ch, fsign);
+                    T_FN(passf6_ol_ps)(l1, (const T_V*)cc, (T_V*)out, fsign);
                 }
-                // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison,cert-exp42-c,cert-flp37-c) -- bit-exact layout check.
-                bad += memcmp(out + (ptrdiff_t)2 * p * V, want, (size_t)2 * V * sizeof(float)) != 0;
+                for (p = 0; p < R * l1; ++p) {
+                    const float *a = ch + (ptrdiff_t)2 * p * V, *b = a + V;
+                    float want[16];
+                    /* 4 lanes: a0 b0 a1 b1 | a2 b2 a3 b3;
+           8 lanes: a0 b0 a1 b1 a4 b4 a5 b5 | a2 b2 a3 b3 a6 b6 a7 b7 */
+                    if (V == 4) {
+                        want[0] = a[0];
+                        want[1] = b[0];
+                        want[2] = a[1];
+                        want[3] = b[1];
+                        want[4] = a[2];
+                        want[5] = b[2];
+                        want[6] = a[3];
+                        want[7] = b[3];
+                    } else {
+                        want[0] = a[0];
+                        want[1] = b[0];
+                        want[2] = a[1];
+                        want[3] = b[1];
+                        want[4] = a[4];
+                        want[5] = b[4];
+                        want[6] = a[5];
+                        want[7] = b[5];
+                        want[8] = a[2];
+                        want[9] = b[2];
+                        want[10] = a[3];
+                        want[11] = b[3];
+                        want[12] = a[6];
+                        want[13] = b[6];
+                        want[14] = a[7];
+                        want[15] = b[7];
+                    }
+                    // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison,cert-exp42-c,cert-flp37-c) -- bit-exact layout check.
+                    bad += memcmp(out + (ptrdiff_t)2 * p * V, want, (size_t)2 * V * sizeof(float)) != 0;
+                }
+                if (bad) {
+                    printf("  (passf%d_ol_ps: fsign %+g, l1 %d: %d pairs differ)\n", R, fsign, l1, bad);
+                }
+                fails += T_CHECK(bad == 0);
             }
-            if (bad) {
-                printf("  (passf8_ol_ps: fsign %+g, l1 %d: %d pairs differ)\n", fsign, l1, bad);
-            }
-            fails += T_CHECK(bad == 0);
         }
     }
 done:
@@ -824,12 +879,13 @@ done:
    cfftf1_tail_ol_ps interleaving into its own input or into the other
    buffer, against the route with three distinct buffers, bit for bit; and
    the round trip. n = 2 is a single radix-2 pass with one element per leg,
-   which must take the ordinary route */
+   which must take the ordinary route, and with PFFFT_TERMINAL_RADIX8 n = 6
+   a single radix-6 pass (24, 30, 96, 120, 384 end with one) */
 static int
 T_NAME(test_driver_routes)(void) {
     static const int ns[] = {
-        2,  3,  4,  5,   6,   8,   10,  12,  15,  16,  20,   24,   32,   40,
-        48, 64, 96, 128, 160, 192, 256, 320, 512, 960, 1024, 2048, 4096,
+        2,  3,  4,  5,   6,   8,   10,  12,  15,  16,  20,  24,  30,   32,   40,
+        48, 64, 96, 120, 128, 160, 192, 256, 320, 384, 512, 960, 1024, 2048, 4096,
     };
     const int nmax = 4096, V = T_LANES;
     const size_t cap = (size_t)2 * nmax * V;
@@ -924,6 +980,7 @@ T_NAME(run_backend_tests)(void) {
     fails += T_NAME(test_real_odd_radix)();
 #if PFFFT_TERMINAL_RADIX8
     fails += T_NAME(test_radix8_complex)();
+    fails += T_NAME(test_radix6_complex)();
     fails += T_NAME(test_radix8_real)();
 #endif
 #if PFFFT_TERMINAL_RADIX8 && T_FUSED

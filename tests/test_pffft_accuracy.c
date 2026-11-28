@@ -31,6 +31,16 @@
 #include "pffft_internal.h"
 #include "pffft_setup.h"
 #include "fft_reference.h"
+/* the pass schedule switches of the build for the depth-first checks:
+   those of the 4-lane backends and of the 8-lane one, which is built next
+   to the 4-lane SSE one. pffft_pass_config.h wants a SIMD_SZ, which a
+   definition of the build may use, so they are read while it is defined. */
+#define SIMD_SZ 4
+#include "pffft_pass_config.h"
+static const int t_depth_first = PFFFT_DEPTH_FIRST;
+static const int t_terminal_radix8 = PFFFT_TERMINAL_RADIX8;
+static const unsigned long long t_df_min_bytes_wide = (unsigned long long)(PFFFT_DEPTH_FIRST_MIN_BYTES_WIDE);
+#undef SIMD_SZ
 #include "test_size_arg.h"
 
 #include <stdio.h>
@@ -605,15 +615,50 @@ test_depth_first_size(int backend, int N, int forced) {
     return 1;
 }
 
+/* whether the complex plan of N on 'backend' allows the depth-first
+   schedule: its first 'top' passes (1 with 4 lanes, 2 with 8) radix 4,
+   and two more after them */
+static int
+depth_first_plan(int backend, int N) {
+    PFFFT_Setup* s = pffft_internal_new_setup(N, PFFFT_COMPLEX, backend | PFFFT_BACKEND_BREADTH_FIRST);
+    int count = 0, top, k, ok;
+    const int* f;
+    if (!s) {
+        return 0;
+    }
+    f = pffft_internal_plan(s, &count);
+    top = pffft_setup_simd_size(s) == 8 ? 2 : 1;
+    ok = count >= top + 2;
+    for (k = 0; ok && k < top; ++k) {
+        ok = f[k] == 4;
+    }
+    pffft_destroy_setup(s);
+    return ok;
+}
+
 /* every complex size up to max_n whose plan allows the depth-first
-   schedule, forced; returns their number */
+   schedule, forced; returns their number. Where the build has the
+   schedule (PFFFT_DEPTH_FIRST, on a backend with 4 or 8 lanes), every
+   plan that allows it must take it. */
 static int
 test_depth_first(int backend, int nmin, int max_n) {
-    int N, tested = 0;
+    int N, tested = 0, missed = 0, first_missed = 0;
     for (N = nmin; N <= max_n; N += nmin) {
         if (is_smooth(N / nmin)) {
-            tested += test_depth_first_size(backend, N, 1);
+            const int t = test_depth_first_size(backend, N, 1);
+            tested += t;
+            if (!t && depth_first_plan(backend, N)) {
+                if (!missed) {
+                    first_missed = N;
+                }
+                ++missed;
+            }
         }
+    }
+    if (t_depth_first && (backend == PFFFT_BACKEND_W8 || pffft_simd_size() >= 4) && missed) {
+        printf("FAIL: %d COMPLEX plans that allow the depth-first schedule did not take it, the first N=%d\n", missed,
+               first_missed);
+        ++num_failures;
     }
     return tested;
 }
@@ -691,13 +736,23 @@ main(int argc, char** argv) {
             printf("worst rel. L2 error in eps*log2(N): forward %.3f, backward %.3f, convolution %.3f (limit %.1f)\n",
                    worst_fwd, worst_bwd, worst_conv, TOL_FFT);
             {
-                /* with 8 lanes pffft_new_setup() schedules these two depth
-                 first, one with slices that are leaves and one deeper */
-                static const int auto_sizes[] = {16384, 65536};
+                /* with 8 lanes and the default settings pffft_new_setup()
+                 schedules these depth first: slices that are leaves,
+                 deeper ones, and a plan that ends with radix 6 (4, 4, 4,
+                 4, 4, 6) */
+                static const int auto_sizes[] = {16384, 65536, 49152};
+                int k;
                 worst_fwd = worst_bwd = worst_conv = 0;
                 N = test_depth_first(PFFFT_BACKEND_W8, 64, max_n);
-                N += test_depth_first_size(PFFFT_BACKEND_W8, auto_sizes[0], 0);
-                N += test_depth_first_size(PFFFT_BACKEND_W8, auto_sizes[1], 0);
+                for (k = 0; k < 3; ++k) {
+                    const int t = test_depth_first_size(PFFFT_BACKEND_W8, auto_sizes[k], 0);
+                    N += t;
+                    /* the threshold test of pffft_df_levels; their plans
+                       start with radix-4 passes with PFFFT_TERMINAL_RADIX8 */
+                    if (t_depth_first && t_terminal_radix8 && !t && 8ULL * auto_sizes[k] + 1 > t_df_min_bytes_wide) {
+                        report_failure("8 lanes: not scheduled depth first", auto_sizes[k], 1, 0);
+                    }
+                }
                 printf("8-lane backend, depth-first schedule: tested %d COMPLEX sizes\n", N);
                 if (N) {
                     printf("worst rel. L2 error in eps*log2(N): forward %.3f, backward %.3f, convolution %.3f (limit "

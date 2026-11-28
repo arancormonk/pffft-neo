@@ -138,6 +138,7 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define passf4_ps            pffft_w8_passf4_ps
 #define passf5_ps            pffft_w8_passf5_ps
 #define passf8_ps            pffft_w8_passf8_ps
+#define passf6_ps            pffft_w8_passf6_ps
 #define passf2_op_body       pffft_w8_passf2_op_body
 #define passf3_op_body       pffft_w8_passf3_op_body
 #define passf4_op_body       pffft_w8_passf4_op_body
@@ -204,6 +205,7 @@ typedef __m256 pffft_v8sf __attribute__((aligned(16)));
 #define passf4_ol_body       pffft_w8_passf4_ol_body
 #define passf4_ol_ps         pffft_w8_passf4_ol_ps
 #define passf8_ol_ps         pffft_w8_passf8_ol_ps
+#define passf6_ol_ps         pffft_w8_passf6_ol_ps
 #define passf4_il_butterfly  pffft_w8_passf4_il_butterfly
 #define passf2_body          pffft_w8_passf2_body
 #define passf2_ip_ps         pffft_w8_passf2_ip_ps
@@ -1279,6 +1281,7 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform, in
 #undef passf4_ps
 #undef passf5_ps
 #undef passf8_ps
+#undef passf6_ps
 #undef passf2_op_body
 #undef passf3_op_body
 #undef passf4_op_body
@@ -1345,6 +1348,7 @@ W8_ENTRY(PFFFT_Setup*) pffft_w8_new_setup(int N, pffft_transform_t transform, in
 #undef passf4_ol_body
 #undef passf4_ol_ps
 #undef passf8_ol_ps
+#undef passf6_ol_ps
 #undef passf4_il_butterfly
 #undef passf2_body
 #undef passf2_ip_ps

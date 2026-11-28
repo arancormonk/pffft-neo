@@ -11,12 +11,13 @@
   PFFFT_TERMINAL_RADIX8
     No stand-alone radix-2 pass: where a plan has a radix-2 and a radix-4
     pass, the pair is replaced by one twiddle-free radix-8 pass, the one
-    with one element per leg (complex factors 2, ..., 4 become ..., 8; real
-    factors 2, 4, ..., 3..., 5... become 4..., 3..., 5..., 8, the 3s and
-    5s then with an even ido; or, up to PFFFT_REAL_RADIX6_MAX_BYTES
-    (..._WIDE with 8 lanes), with a twiddle-free radix-6 pass of the 2 and
-    a 3). One pass fewer over the data; results differ in the last bits at
-    the sizes whose plan changes.
+    with one element per leg (complex factors 2, ..., 4 become ..., 8, or,
+    with a 3, 2, ..., 3, ... become ..., 6, a twiddle-free radix-6 pass of
+    the 2 and a 3; real factors 2, 4, ..., 3..., 5... become 4..., 3...,
+    5..., 8, the 3s and 5s then with an even ido, or, up to
+    PFFFT_REAL_RADIX6_MAX_BYTES (..._WIDE with 8 lanes), end with a
+    radix-6 pass of the 2 and a 3). One pass fewer over the data; results
+    differ in the last bits at the sizes whose plan changes.
 
   PFFFT_INPLACE_FIRST_PASS
     Complex transforms on the backends with fused layout passes: the first

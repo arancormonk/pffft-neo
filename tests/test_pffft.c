@@ -693,9 +693,12 @@ main(int argc, char** argv) {
      table), at 3840 but not 1920. With a 3, up to
      PFFFT_REAL_RADIX6_MAX_BYTES (4 N bytes; 4096 points with 4 lanes)
      the last pass is radix 6 instead, the 3s and 5s left then with an
-     even ido too (4 lanes: 96 -> 4, 6; 288, 480, 1152, 1920, 2592). All
-     are multiples of 32, so they are valid REAL and COMPLEX sizes for
-     every SIMD_SZ. */
+     even ido too (4 lanes: 96 -> 4, 6; 288, 480, 1152, 1920, 2592). With
+     PFFFT_TERMINAL_RADIX8 the complex transform ends with a radix-6 pass
+     wherever the per-lane length has an odd power of two and a 3 (4
+     lanes: 96, 288, 480, 1152, 1920, 2592, 12000, 48000), else, with a
+     lone 2 and a 4, with a radix-8 pass. All are multiples of 32, so they
+     are valid REAL and COMPLEX sizes for every SIMD_SZ. */
     {
         static const int sizes[] = {
             32,  64,  128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 96,
