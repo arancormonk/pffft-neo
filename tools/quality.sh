@@ -25,3 +25,6 @@ run-clang-tidy -quiet -j 4 -p build/quality
 # Cppcheck selects the portable GNU C implementation of the shared code.
 cppcheck --project=build/quality/compile_commands.json -D__GNUC__=4 --std=c99 \
   --enable=warning,performance,portability --error-exitcode=1 -j4
+# pffft_prefetch_tu.c has code only with the 8-lane backend (x86-64, GCC 5+)
+cppcheck --project=build/quality/compile_commands.json --file-filter=src/pffft_prefetch_tu.c -D__GNUC__=5 \
+  -D__x86_64__=1 --std=c99 --enable=warning,performance,portability --error-exitcode=1 -j4

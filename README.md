@@ -69,6 +69,24 @@ For dispatch-table research, build the same revision twice, with
 with `--labels native4 wide --operations all` and at least three samples per
 case. Inspect the CSV with `python3 tools/wide_size_table.py --report build/comparison.csv`.
 
+Builds with the 8-lane backend (x86-64) also have transforms whose passes
+prefetch the lines they write, compiled in a translation unit of their own
+(`src/pffft_prefetch_tu.c`), so that the code of the other transforms stays
+as it is. `pffft_new_setup()` uses them on Intel big cores (family 6, not
+Atom, not hybrid parts) for arrays of at least half the level-1 data cache,
+and for complex transforms on Ice Lake server cores from 1 MiB. On Haswell,
+from 32 KiB per array on, they typically took 20 to 38% off backward and 7
+to 27% off forward real transforms and 9 to 18% off complex ones, but at
+lengths with factors 5 less: 20000 real points ran 4.5% faster backward and
+0.8% slower forward. AMD CPUs, smaller transforms and the depth-first
+schedule run the passes without prefetches, as do builds with
+`-DPFFFT_ENABLE_WIDE_DISPATCH=OFF` (so a `native4` baseline built that way
+lacks them on Intel) and builds that compile `pffft.c` without
+`src/pffft_prefetch_tu.c` and `PFFFT_PREFETCH_TU` (CMake defines it).
+`-DPFFFT_DISABLE_PREFETCH=ON` leaves them out of the build. They give the
+same bits for finite input (the payload of a NaN may differ, as between any
+two compilations).
+
 ## Compare FFT accuracy
 
 `benchmarks/` also builds `fft_accuracy`, which measures every transform

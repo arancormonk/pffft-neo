@@ -34,6 +34,15 @@ PFFFT_EXPORT int validate_pffft_simd_ex(FILE* out);
 #define PFFFT_BACKEND_DEPTH_FIRST   0x100
 #define PFFFT_BACKEND_BREADTH_FIRST 0x200
 
+/* added to a backend: whether the passes of a native setup prefetch the
+   lines they write, which pffft_new_setup() picks from the CPU and the
+   transform size where the build has the prefetching passes (x86-64, SSE).
+   PFFFT_BACKEND_PREFETCH makes the passes prefetch, at any size and on any
+   CPU; PFFFT_BACKEND_NO_PREFETCH never. No effect on the results, nor on
+   8-lane setups, depth-first ones, nor in builds without them. */
+#define PFFFT_BACKEND_PREFETCH      0x400
+#define PFFFT_BACKEND_NO_PREFETCH   0x800
+
 /*
   pffft_new_setup() with a forced backend. PFFFT_BACKEND_W8 ignores the
   CPU-model and size tables (but not the instruction-set checks) so tests
@@ -47,6 +56,10 @@ PFFFT_EXPORT PFFFT_Setup* pffft_internal_new_setup(int N, pffft_transform_t tran
    ones, plans without leading radix-4 passes, PFFFT_DEPTH_FIRST off), else
    1 + the number of depth-first passes within a slice */
 PFFFT_EXPORT int pffft_internal_depth_first_levels(const PFFFT_Setup* setup);
+
+/* 1 if the transforms of the setup run the passes that prefetch the lines
+   they write, else 0 (also for 8-lane setups and in builds without them) */
+PFFFT_EXPORT int pffft_internal_prefetch_passes(const PFFFT_Setup* setup);
 
 /* the radices of the setup's passes in the order the plan stores them
    (ifac), which is not always the order they run in (real forward

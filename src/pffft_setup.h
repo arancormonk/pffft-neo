@@ -21,6 +21,10 @@
 
 #define PFFFT_SETUP_KIND_NATIVE 0 /* the SIMD_SZ-lane implementation of pffft_priv_impl.h */
 #define PFFFT_SETUP_KIND_W8     1 /* 8-lane AVX2 float backend, pffft_wide_impl.h */
+/* added to PFFFT_SETUP_KIND_NATIVE in 'kind' (PFFFT_PREFETCH): the
+   transforms run the passes that prefetch the lines they write
+   (pffft_prefetch_tu.c) */
+#define PFFFT_SETUP_PF          0x100
 
 /* PFFFT_DEPTH_FIRST (pffft_pass_config.h) for a new complex setup */
 #define PFFFT_DF_OFF            (-1) /* never */
@@ -32,7 +36,9 @@
   Ncvec      nb of complex simd vectors (N/4 if PFFFT_COMPLEX, N/8 if PFFFT_REAL)
   ifac       the decomposition of N into small integers: N, number of
              factors, factors (admitted values: 2, 3, 4, 5, 6 or 8)
-  kind       PFFFT_SETUP_KIND_*: which backend created the setup
+  kind       PFFFT_SETUP_KIND_*: which backend created the setup; a
+             native setup may add PFFFT_SETUP_PF (W8 setups never do, so
+             kind == PFFFT_SETUP_KIND_W8 tells the backend)
   data       allocated room for twiddle coefs
   e          points into 'data', N/4*3 elements
   twiddle    points into 'data', N/4 elements

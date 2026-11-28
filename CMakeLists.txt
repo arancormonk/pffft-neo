@@ -39,6 +39,11 @@ option(
     ON
 )
 option(PFFFT_DISABLE_FMA "Disable explicit FMA and compiler contraction" OFF)
+option(
+    PFFFT_DISABLE_PREFETCH
+    "Leave out the prefetching passes that x86-64 builds use on Intel CPUs"
+    OFF
+)
 
 if(MSVC)
     add_compile_options(/W4 /wd4244 /wd4305)
@@ -85,6 +90,9 @@ if(PFFFT_USE_SCALAR_VECT)
 endif()
 if(NOT PFFFT_ENABLE_WIDE_DISPATCH)
     target_compile_definitions(PFFFT PRIVATE PFFFT_DISABLE_WIDE=1)
+endif()
+if(PFFFT_DISABLE_PREFETCH)
+    target_compile_definitions(PFFFT PRIVATE PFFFT_DISABLE_PREFETCH=1)
 endif()
 if(PFFFT_DISABLE_FMA)
     target_compile_definitions(PFFFT PRIVATE PFFFT_DISABLE_FMA=1)
@@ -144,6 +152,44 @@ if(
         )
         target_sources(PFFFT PRIVATE $<TARGET_OBJECTS:pffft_wide_object>)
     endif()
+endif()
+
+# The transforms with prefetching passes for Intel CPUs, in a translation
+# unit of their own (src/pffft_prefetch_tu.c), with pffft.c's flags. Keep
+# IPO off for it, so that pffft.c's code stays that of a build without them.
+if(PFFFT_USE_SIMD AND PFFFT_ENABLE_WIDE_DISPATCH AND NOT PFFFT_DISABLE_PREFETCH)
+    add_library(pffft_prefetch_object OBJECT src/pffft_prefetch_tu.c)
+    set_target_properties(
+        pffft_prefetch_object
+        PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            C_VISIBILITY_PRESET hidden
+            INTERPROCEDURAL_OPTIMIZATION OFF
+    )
+    foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES CMAKE_BUILD_TYPE)
+        string(TOUPPER "${config}" upper)
+        set_property(
+            TARGET pffft_prefetch_object
+            PROPERTY INTERPROCEDURAL_OPTIMIZATION_${upper} OFF
+        )
+    endforeach()
+    target_compile_definitions(PFFFT PRIVATE PFFFT_PREFETCH_TU=1)
+    target_compile_definitions(
+        pffft_prefetch_object
+        PRIVATE $<TARGET_PROPERTY:PFFFT,COMPILE_DEFINITIONS>
+    )
+    target_include_directories(
+        pffft_prefetch_object
+        PRIVATE $<TARGET_PROPERTY:PFFFT,INCLUDE_DIRECTORIES>
+    )
+    target_compile_options(
+        pffft_prefetch_object
+        PRIVATE
+            $<TARGET_PROPERTY:PFFFT,COMPILE_OPTIONS>
+            $<$<C_COMPILER_ID:MSVC>:/GL->
+            $<$<C_COMPILER_ID:GNU,Clang>:-fno-lto>
+    )
+    target_sources(PFFFT PRIVATE $<TARGET_OBJECTS:pffft_prefetch_object>)
 endif()
 
 if(PFFFT_BUILD_TESTS)

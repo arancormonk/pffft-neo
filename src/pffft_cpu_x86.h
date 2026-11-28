@@ -4,7 +4,8 @@
  */
 
 /*
-  Runtime detection for the 8-lane AVX2 float backend (pffft_wide_impl.h).
+  Runtime detection for the 8-lane AVX2 float backend (pffft_wide_impl.h)
+  and for the output prefetching of the 4-lane passes.
 
   The CPUID and XGETBV instructions are reached through a small table of
   function pointers so that tests can replace them with fakes and check
@@ -204,9 +205,10 @@ pffft_x86_cache_bytes(const unsigned* r) {
     return ways * partitions * line * sets; /* at most 2^52: no overflow */
 }
 
-/* the level-2 data or unified cache in a deterministic cache leaf, 0 if none */
+/* the data or unified cache of that level in a deterministic cache leaf,
+   0 if none */
 static unsigned long long
-pffft_x86_l2_from_leaf(const pffft_x86_cpu_ops* ops, unsigned leaf) {
+pffft_x86_cache_from_leaf(const pffft_x86_cpu_ops* ops, unsigned leaf, unsigned want_level) {
     unsigned r[4], k;
     for (k = 0; k < 32; ++k) {
         unsigned type, level;
@@ -216,11 +218,17 @@ pffft_x86_l2_from_leaf(const pffft_x86_cpu_ops* ops, unsigned leaf) {
         if (type == 0) {
             break; /* no more caches */
         }
-        if (level == 2 && (type == 1 || type == 3)) {
+        if (level == want_level && (type == 1 || type == 3)) {
             return pffft_x86_cache_bytes(r);
         }
     }
     return 0;
+}
+
+/* the level-2 data or unified cache in a deterministic cache leaf, 0 if none */
+static unsigned long long
+pffft_x86_l2_from_leaf(const pffft_x86_cpu_ops* ops, unsigned leaf) {
+    return pffft_x86_cache_from_leaf(ops, leaf, 2);
 }
 
 /*
@@ -257,6 +265,84 @@ pffft_x86_l2_bytes(const pffft_x86_cpu_ops* ops, const pffft_x86_cpu_id* id) {
     }
     return 0;
 }
+
+/*
+  Output prefetching of the 4-lane SSE passes (PFFFT_PREFETCH,
+  pffft_passes_impl.h): 1 if a transform whose arrays have 'bytes' bytes
+  each should run them (PFFFT_SETUP_PF, pffft_setup.h), else 0.
+
+  Out of the level-1 data cache the passes are bound by their stores. On
+  an Intel core prefetching the lines they write made real transforms 20
+  to 38% and complex ones 9 to 18% faster (Haswell, Xeon E5-2697 v3, 32
+  KiB, from 24 and 32 KiB per array on), as upstream PFFFT found on later
+  ones (Coffee Lake, Ice Lake, Emerald and Granite Rapids Xeons). On AMD
+  Zen cores the prefetches cost 1.5 to 7.5% at every size (Zen 3, Ryzen 9
+  5950X; upstream: up to 6% with gcc, 14% with MSVC). So: Intel family 6
+  big cores only. Not Atom cores, nor hybrid parts, whose E-cores and the
+  core a setup runs on were not measured; not later families either.
+
+  The passes prefetch from half the level-1 data cache on: below it they
+  cost up to 3% on Haswell (from 10 KiB on, the first pass of a backward
+  real transform alone gained 3 to 5%, which a single setting for all the
+  passes gives up), and half the cache is also what upstream PFFFT
+  measured best on Intel cores with 48 KiB (24 KiB) and 32 KiB (16 KiB).
+  The exception, also from upstream: complex transforms on Ice Lake server
+  cores (models 6Ah, 6Ch) ran up to 6% slower with prefetches below 1 MiB.
+  The size comes from the deterministic cache leaf 4; without it (a
+  virtual machine may hide it) nothing prefetches. No CPUID below 8 KiB,
+  the threshold of the smallest level-1 cache considered (16 KiB).
+*/
+#if !defined(PFFFT_PREFETCH) || PFFFT_PREFETCH /* the tests include this file without it */
+static const unsigned char pffft_x86_intel_atom[] = {
+    0x1C, 0x26, 0x27, 0x35, 0x36,             /* Bonnell, Saltwell */
+    0x37, 0x4A, 0x4C, 0x4D, 0x5A, 0x5D, 0x75, /* Silvermont, Airmont */
+    0x57, 0x85,                               /* Knights Landing, Knights Mill */
+    0x5C, 0x5F, 0x7A,                         /* Goldmont, Goldmont Plus */
+    0x86, 0x96, 0x9C,                         /* Tremont */
+    0xBE,                                     /* Gracemont (Alder Lake-N) */
+    0xAF, 0xB6, 0xDD,                         /* Crestmont, Darkmont */
+};
+
+static int
+pffft_x86_prefetch_passes(const pffft_x86_cpu_ops* ops, unsigned long long bytes, int real) {
+    unsigned r[4], max_leaf, family, model, k;
+    unsigned long long l1d, min;
+    if (bytes < 8192u) {
+        return 0;
+    }
+    ops->cpuid(ops->ctx, 0, 0, r);
+    max_leaf = r[0];
+    if (!(r[1] == 0x756e6547u && r[3] == 0x49656e69u && r[2] == 0x6c65746eu) || max_leaf < 4) {
+        return 0; /* not "GenuineIntel", or no leaf 4 */
+    }
+    ops->cpuid(ops->ctx, 1, 0, r);
+    family = (r[0] >> 8) & 0xFu;
+    model = ((r[0] >> 4) & 0xFu) | (((r[0] >> 16) & 0xFu) << 4);
+    if (family != 6) {
+        return 0;
+    }
+    for (k = 0; k < sizeof(pffft_x86_intel_atom); ++k) {
+        if (model == pffft_x86_intel_atom[k]) {
+            return 0;
+        }
+    }
+    if (max_leaf >= 7) {
+        ops->cpuid(ops->ctx, 7, 0, r);
+        if (r[3] & PFFFT_X86_EDX7_HYBRID) {
+            return 0;
+        }
+    }
+    l1d = pffft_x86_cache_from_leaf(ops, 4, 1);
+    if (l1d < 16384u || l1d > 1048576u) {
+        return 0; /* none, or not a level-1 size */
+    }
+    min = l1d / 2;
+    if (!real && (model == 0x6A || model == 0x6C)) {
+        min = 1048576u; /* Ice Lake server */
+    }
+    return bytes >= min;
+}
+#endif
 
 /*
   CPU classes for the default 8-lane backend selection

@@ -57,6 +57,9 @@ endif()
 if(MSVC)
     target_link_options(test_pffft_wide PRIVATE /MAP)
     set(objects $<TARGET_OBJECTS:PFFFT>)
+    if(TARGET pffft_prefetch_object)
+        list(APPEND objects $<TARGET_OBJECTS:pffft_prefetch_object>)
+    endif()
     set(required "")
     if(TARGET pffft_wide_object)
         list(APPEND objects $<TARGET_OBJECTS:pffft_wide_object>)
@@ -86,11 +89,17 @@ if(MSVC)
         )
     endif()
 else()
-    # An IPO archive contains bitcode. Audit the linked image in that case.
+    # An IPO archive contains bitcode, so is one built with -flto in the C
+    # flags. Audit the linked image in that case.
     get_target_property(ipo PFFFT INTERPROCEDURAL_OPTIMIZATION)
+    set(lto_flag "(^| )-flto")
     set(image "$<TARGET_FILE:PFFFT>")
-    if(ipo)
+    # an archive must have pffft.c's code, so that pffft_prefetch_tu.c's code
+    # alone cannot pass (in a linked image these may be inlined)
+    set(require "--require;pffft_new_setup$<COMMA>pffft_transform")
+    if(ipo OR CMAKE_C_FLAGS MATCHES "${lto_flag}")
         set(image "$<TARGET_FILE:test_pffft_wide>")
+        set(require "")
     endif()
     foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES CMAKE_BUILD_TYPE)
         string(TOUPPER "${config}" upper)
@@ -99,13 +108,18 @@ else()
             TARGET PFFFT
             PROPERTY INTERPROCEDURAL_OPTIMIZATION_${upper}
         )
-        if(config_ipo)
+        if(config_ipo OR CMAKE_C_FLAGS_${upper} MATCHES "${lto_flag}")
             set(image
                 "$<IF:$<CONFIG:${config}>,$<TARGET_FILE:test_pffft_wide>,${image}>"
             )
+            set(require "$<IF:$<CONFIG:${config}>,,${require}>")
         endif()
     endforeach()
-    add_test(NAME check_isa_baseline COMMAND ${audit} ${args} ${image})
+    add_test(
+        NAME check_isa_baseline
+        COMMAND ${audit} ${args} "${require}" ${image}
+        COMMAND_EXPAND_LISTS
+    )
     set(assembler "${CMAKE_C_COMPILER}")
 endif()
 if(assembler)

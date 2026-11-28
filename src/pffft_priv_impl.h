@@ -78,6 +78,7 @@
 
 #include "pffft_setup.h" /* PFFFT_MAX_N, the setup structure */
 
+#if !defined(PFFFT_PREFETCH_TU_PART) /* not in pffft_prefetch_tu.c */
 int
 FUNC_SIMD_SIZE(void) {
     return SIMD_SZ;
@@ -148,6 +149,7 @@ const char*
 FUNC_SIMD_ARCH(void) {
     return VARCH;
 }
+#endif
 
 #if (SIMD_SZ == 4)
 /* fuse the complex (de)interleaving into the first/last passes */
@@ -155,8 +157,14 @@ FUNC_SIMD_ARCH(void) {
 #define PF_UNINTERLEAVE2 UNINTERLEAVE2
 #define PF_INTERLEAVE2   INTERLEAVE2
 #endif
+#if defined(PFFFT_PREFETCH_TU_PART)
+#define PF_PREFETCH_PASSES 1 /* pffft_prefetch_tu.c: every pass prefetches */
+#else
+#define PF_PREFETCH_PASSES 0
+#endif
 #define PF_INPLACE_CODELETS 0 /* the file includes itself with 1 for the in-place codelets */
 #include "pffft_passes_impl.h"
+#undef PF_PREFETCH_PASSES
 #undef PF_FUSED_LAYOUT
 #undef PF_UNINTERLEAVE2
 #undef PF_INTERLEAVE2
@@ -204,6 +212,7 @@ pffft_df_levels(int N, int depth_first) {
 static ALWAYS_INLINE(int*) pffft_df_rev(const SETUP_STRUCT* s) { return (int*)(s->data + 2 * s->Ncvec); }
 #endif
 
+#if !defined(PFFFT_PREFETCH_TU_PART) /* not in pffft_prefetch_tu.c */
 SETUP_STRUCT*
 FUNC_NEW_SETUP(int N, pffft_transform_t transform, int depth_first) {
     SETUP_STRUCT* s = 0;
@@ -302,9 +311,11 @@ FUNC_DESTROY(SETUP_STRUCT* s) {
     FUNC_ALIGNED_FREE(s->data);
     free(s);
 }
+#endif
 
 #if (SIMD_SZ == 4) /* !defined(PFFFT_SIMD_DISABLE) */
 
+#if !defined(PFFFT_PREFETCH_TU_PART) /* not in pffft_prefetch_tu.c */
 /* [0 0 1 2 3 4 5 6 7 8] -> [0 8 7 6 5 4 3 2 1] */
 static void
 reversed_copy(int N, const v4sf* in, int in_stride, v4sf* out) {
@@ -384,13 +395,16 @@ FUNC_ZREORDER(const SETUP_STRUCT* setup, const float* in, float* out, pffft_dire
         }
     }
 }
+#endif
 
 #define PFFFT_CPLX_ORDERED 0
 #define PFFFT_CPLX_STREAMS 0
 #define PFFFT_CPLX_SCOPE
 #define PFFFT_CPLX_FINALIZE   FUNC_CPLX_FINALIZE
 #define PFFFT_CPLX_PREPROCESS FUNC_CPLX_PREPROCESS
+#if !defined(PFFFT_PREFETCH_TU_PART) /* not in pffft_prefetch_tu.c */
 #include "pffft_cplx_impl.h"
+#endif
 #undef PFFFT_CPLX_ORDERED
 #undef PFFFT_CPLX_SCOPE
 #undef PFFFT_CPLX_FINALIZE
@@ -747,7 +761,7 @@ static NEVER_INLINE(void) pffft_transform_complex_inplace(const SETUP_STRUCT* se
     }
 }
 
-#if PFFFT_DEPTH_FIRST
+#if PFFFT_DEPTH_FIRST && !defined(PFFFT_PREFETCH_TU_PART) /* (no depth-first setup prefetches) */
 /* Complex transforms of a depth-first setup (pffft_passes_impl.h). The
    passes run in the scratch buffer; finalize and preprocess go from it to
    the output and from the input to it. The output buffer holds the
@@ -783,6 +797,7 @@ static NEVER_INLINE(void) pffft_transform_complex_df(const SETUP_STRUCT* setup, 
 }
 #endif
 
+#if !defined(PFFFT_PREFETCH_TU_PART) /* not in pffft_prefetch_tu.c */
 void
 FUNC_ZCONVOLVE_ACCUMULATE(const SETUP_STRUCT* s, const float* a, const float* b, float* ab, float scaling) {
     int Ncvec = s->Ncvec;
@@ -1030,7 +1045,8 @@ FUNC_ZCONVOLVE_ZP(const SETUP_STRUCT* s, const float* x, const float* hzp, float
     return 0;
 }
 
-#else /* #if ( SIMD_SZ == 4 )   * !defined(PFFFT_SIMD_DISABLE) */
+#endif /* !PFFFT_PREFETCH_TU_PART */
+#else  /* #if ( SIMD_SZ == 4 )   * !defined(PFFFT_SIMD_DISABLE) */
 
 /* standard routine using scalar floats, without SIMD stuff. */
 
@@ -1257,7 +1273,7 @@ void
 FUNC_TRANSFORM_UNORDRD(const SETUP_STRUCT* setup, const float* input, float* output, float* work,
                        pffft_direction_t direction) {
 #if SIMD_SZ == 4
-#if PFFFT_DEPTH_FIRST
+#if PFFFT_DEPTH_FIRST && !defined(PFFFT_PREFETCH_TU_PART) /* (no depth-first setup prefetches) */
     if (setup->df_levels) {
         pffft_transform_complex_df(setup, input, output, (v4sf*)work, direction, 0);
         return;
@@ -1275,7 +1291,7 @@ void
 FUNC_TRANSFORM_ORDERED(const SETUP_STRUCT* setup, const float* input, float* output, float* work,
                        pffft_direction_t direction) {
 #if SIMD_SZ == 4
-#if PFFFT_DEPTH_FIRST
+#if PFFFT_DEPTH_FIRST && !defined(PFFFT_PREFETCH_TU_PART) /* (no depth-first setup prefetches) */
     if (setup->df_levels) {
         pffft_transform_complex_df(setup, input, output, (v4sf*)work, direction, 1);
         return;
@@ -1293,6 +1309,7 @@ FUNC_TRANSFORM_ORDERED(const SETUP_STRUCT* setup, const float* input, float* out
 #endif
 }
 
+#if !defined(PFFFT_PREFETCH_TU_PART) /* not in pffft_prefetch_tu.c */
 #if (SIMD_SZ == 4)
 
 #define assertv4(v, f0, f1, f2, f3) assert((v).f[0] == (f0) && (v).f[1] == (f1) && (v).f[2] == (f2) && (v).f[3] == (f3))
@@ -1930,5 +1947,6 @@ FUNC_VALIDATE_SIMD_EX(FILE* DbgOut) {
 }
 
 #endif /* end if ( SIMD_SZ == 4 ) */
+#endif /* !PFFFT_PREFETCH_TU_PART */
 
 #endif /* PFFFT_PRIV_IMPL_H */

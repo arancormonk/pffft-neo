@@ -663,6 +663,76 @@ test_depth_first(int backend, int nmin, int max_n) {
     return tested;
 }
 
+/* The passes that prefetch the lines they write (PFFFT_BACKEND_PREFETCH,
+   pffft_prefetch_tu.c) against those that do not: every transform mode,
+   out of place and in place, with scratch on the stack (work NULL) or not,
+   must give the same bits. Returns 1 if the build has them, else 0 without
+   a check. */
+static int
+test_prefetch_size(int N, int cplx) {
+    const pffft_transform_t tt = cplx ? PFFFT_COMPLEX : PFFFT_REAL;
+    const int bf = PFFFT_BACKEND_NATIVE | PFFFT_BACKEND_BREADTH_FIRST;
+    PFFFT_Setup* off = pffft_internal_new_setup(N, tt, bf | PFFFT_BACKEND_NO_PREFETCH);
+    PFFFT_Setup* on = pffft_internal_new_setup(N, tt, bf | PFFFT_BACKEND_PREFETCH);
+    const int nf = cplx ? 2 * N : N;
+    float *x = alloc_buf(nf), *work = alloc_buf(nf), *y = alloc_buf(nf), *z = alloc_buf(nf);
+    int built = 0, k, ord, dir, inplace;
+    if (!on || !off) {
+        report_failure("prefetch: new_setup() returned NULL", N, cplx, 1);
+        goto done;
+    }
+    if (pffft_internal_prefetch_passes(off) != 0) {
+        report_failure("prefetch: forced off, but prefetching", N, cplx, 1);
+    }
+    if (pffft_internal_prefetch_passes(on) == 0) {
+        goto done; /* not in this build */
+    }
+    built = 1;
+    if (cplx) {
+        /* a depth-first setup runs other passes: no flags */
+        PFFFT_Setup* df =
+            pffft_internal_new_setup(N, tt, PFFFT_BACKEND_NATIVE | PFFFT_BACKEND_DEPTH_FIRST | PFFFT_BACKEND_PREFETCH);
+        if (df && pffft_internal_depth_first_levels(df) && pffft_internal_prefetch_passes(df) != 0) {
+            report_failure("prefetch: flags on a depth-first setup", N, cplx, 1);
+        }
+        pffft_destroy_setup(df);
+    }
+    for (k = 0; k < nf; ++k) {
+        x[k] = (float)urand();
+    }
+    for (ord = 0; ord < 2; ++ord) {
+        transform_fn fn = ord ? pffft_transform_ordered : pffft_transform;
+        for (dir = 0; dir < 2; ++dir) {
+            const pffft_direction_t d = dir ? PFFFT_BACKWARD : PFFFT_FORWARD;
+            for (inplace = 0; inplace < 2; ++inplace) {
+                /* the prefetching side with scratch on the stack where that
+                   is small */
+                float* won = nf <= 16384 ? NULL : work;
+                if (inplace) {
+                    memcpy(y, x, sizeof(float) * (size_t)nf);
+                    memcpy(z, x, sizeof(float) * (size_t)nf);
+                    fn(on, y, y, won, d);
+                    fn(off, z, z, work, d);
+                } else {
+                    fn(on, x, y, won, d);
+                    fn(off, x, z, work, d);
+                }
+                if (!same_bits(y, z, nf)) {
+                    report_failure("prefetching passes change the bits", N, cplx, 4 * ord + 2 * dir + inplace);
+                }
+            }
+        }
+    }
+done:
+    pffft_aligned_free(x);
+    pffft_aligned_free(work);
+    pffft_aligned_free(y);
+    pffft_aligned_free(z);
+    pffft_destroy_setup(on);
+    pffft_destroy_setup(off);
+    return built;
+}
+
 static int
 test_reference(void) {
     /* the reference must agree with the defining O(N^2) sum */
@@ -701,6 +771,18 @@ main(int argc, char** argv) {
     printf("tested %d REAL and %d COMPLEX sizes\n", counts[0], counts[1]);
     printf("worst rel. L2 error in eps*log2(N): forward %.3f, backward %.3f, convolution %.3f (limit %.1f)\n",
            worst_fwd, worst_bwd, worst_conv, TOL_FFT);
+
+    /* the prefetching passes, where the build has them: the same bits */
+    counts[0] = counts[1] = 0;
+    for (cplx = 0; cplx < 2; ++cplx) {
+        const int nmin = pffft_min_fft_size(cplx ? PFFFT_COMPLEX : PFFFT_REAL);
+        for (N = nmin; N <= max_n; N += nmin) {
+            if (is_smooth(N / nmin)) {
+                counts[cplx] += test_prefetch_size(N, cplx);
+            }
+        }
+    }
+    printf("prefetching passes: compared %d REAL and %d COMPLEX sizes\n", counts[0], counts[1]);
 
     /* the depth-first schedule: none where the build has it off, or
      without lanes; pffft_new_setup() uses it for larger sizes than the

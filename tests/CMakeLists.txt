@@ -28,6 +28,11 @@ add_test(
     COMMAND test_fft_accuracy --max 320 --seeds 1
 )
 
+# test_pffft_wide checks that the prefetching passes are there or not
+if(PFFFT_DISABLE_PREFETCH)
+    target_compile_definitions(test_pffft_wide PRIVATE PFFFT_DISABLE_PREFETCH=1)
+endif()
+
 if(NOT WIN32)
     find_package(Threads)
     if(Threads_FOUND)
@@ -56,6 +61,12 @@ target_compile_options(
 )
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_pffft_passes_float PRIVATE m)
+endif()
+if(TARGET pffft_prefetch_object)
+    target_sources(
+        test_pffft_passes_float
+        PRIVATE $<TARGET_OBJECTS:pffft_prefetch_object>
+    )
 endif()
 if(TARGET pffft_wide_object)
     target_sources(

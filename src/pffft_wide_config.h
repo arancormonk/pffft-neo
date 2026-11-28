@@ -4,8 +4,9 @@
  */
 
 /*
-  PFFFT_WIDE: 1 when pffft.c builds the 8-lane AVX2 float backend. Include
-  after simd/pf_float.h, which defines PFFFT_SSE_FLOAT_BACKEND.
+  PFFFT_WIDE: 1 when pffft.c builds the 8-lane AVX2 float backend, and
+  PFFFT_PREFETCH (below). Include after simd/pf_float.h, which defines
+  PFFFT_SSE_FLOAT_BACKEND.
 */
 
 #ifndef PFFFT_WIDE_CONFIG_H
@@ -50,6 +51,22 @@
 #define PFFFT_WIDE 1
 #else
 #define PFFFT_WIDE 0
+#endif
+
+/*
+  PFFFT_PREFETCH: 1 when the library has the 4-lane SSE transforms whose
+  passes prefetch the lines they write (pffft_passes_impl.h), in a
+  translation unit of their own, pffft_prefetch_tu.c, which
+  pffft_new_setup() picks on Intel CPUs for transforms out of the level-1
+  data cache (pffft_cpu_x86.h). Only in builds with the 8-lane backend,
+  whose CPU probe it shares, and that compile pffft_prefetch_tu.c and
+  define PFFFT_PREFETCH_TU for it and pffft.c (CMakeLists.txt does both,
+  unless PFFFT_DISABLE_PREFETCH); a build of pffft.c alone has none.
+*/
+#if PFFFT_WIDE && defined(PFFFT_PREFETCH_TU) && !defined(PFFFT_DISABLE_PREFETCH)
+#define PFFFT_PREFETCH 1
+#else
+#define PFFFT_PREFETCH 0
 #endif
 
 #endif /* PFFFT_WIDE_CONFIG_H */

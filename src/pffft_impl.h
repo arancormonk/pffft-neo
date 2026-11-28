@@ -127,7 +127,53 @@ struct PFFFT_Setup {
 #include "pffft_wide_impl.h"
 #endif /* PFFFT_WIDE */
 
-#else /* PFFFT_WIDE_TU_PART */
+#elif defined(PFFFT_PREFETCH_TU_PART)
+/*
+  pffft_prefetch_tu.c: the transforms of the native 4-lane implementation
+  again, with passes that prefetch the lines they write (PFFFT_PREFETCH,
+  pffft_passes_impl.h), under their own names; the public functions of
+  pffft.c call pffft_native_transform_pf and
+  pffft_native_transform_ordered_pf for a setup with PFFFT_SETUP_PF. In a
+  translation unit of its own, so that pffft.c compiles the code of a build
+  without them. Setup, convolution and validation are not compiled here;
+  zreorder and the unordered complex finalize and preprocess are pffft.c's.
+  Baseline instruction set, as pffft.c.
+*/
+#if PFFFT_PREFETCH
+#define SETUP_STRUCT             PFFFT_Setup
+#define FUNC_TRANSFORM_UNORDRD   pffft_native_transform_pf
+#define FUNC_TRANSFORM_ORDERED   pffft_native_transform_ordered_pf
+#define FUNC_TRANSFORM_INTERNAL  pffft_pf_transform_internal
+#define FUNC_ZREORDER            pffft_native_zreorder
+#define FUNC_CPLX_FINALIZE       pffft_cplx_finalize
+#define FUNC_CPLX_PREPROCESS     pffft_cplx_preprocess
+#define FUNC_REAL_PREPROCESS_4X4 pffft_real_preprocess_4x4
+#define FUNC_REAL_PREPROCESS     pffft_real_preprocess
+#define FUNC_REAL_FINALIZE_4X4   pffft_real_finalize_4x4
+#define FUNC_REAL_FINALIZE       pffft_real_finalize
+#define FUNC_ALIGNED_MALLOC      pffft_aligned_malloc
+#define FUNC_ALIGNED_FREE        pffft_aligned_free
+void pffft_native_transform_pf(const PFFFT_Setup* setup, const float* input, float* output, float* work,
+                               pffft_direction_t direction);
+void pffft_native_transform_ordered_pf(const PFFFT_Setup* setup, const float* input, float* output, float* work,
+                                       pffft_direction_t direction);
+void pffft_pf_transform_internal(const PFFFT_Setup* setup, const float* in, float* out, v4sf* work,
+                                 pffft_direction_t direction, int ordered);
+void pffft_native_zreorder(const PFFFT_Setup* setup, const float* input, float* output, pffft_direction_t direction);
+void pffft_cplx_finalize(int n, const v4sf* in, v4sf* out, const v4sf* e);
+void pffft_cplx_preprocess(int n, const v4sf* in, v4sf* out, const v4sf* e);
+/* the setup code, the convolutions and the twiddle tables compile here
+   too, unused: static functions of the shared headers */
+#if defined(__GNUC__) || defined(__clang__) /* clang-cl too */
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma warning(disable : 4505) /* unreferenced function with internal linkage */
+#endif
+#include "pffft_priv_impl.h"
+#endif /* PFFFT_PREFETCH */
+
+#else /* PFFFT_WIDE_TU_PART, PFFFT_PREFETCH_TU_PART */
 
 /* have code comparable with this definition */
 #define SETUP_STRUCT PFFFT_Setup
@@ -157,6 +203,13 @@ void pffft_native_zconvolve_scale(const PFFFT_Setup* setup, const float* dft_a, 
 void pffft_native_zconvolve(const PFFFT_Setup* setup, const float* dft_a, const float* dft_b, float* dft_ab);
 int pffft_native_zconvert_zp(const PFFFT_Setup* setup, const float* in, float* out, float scaling);
 int pffft_native_zconvolve_zp(const PFFFT_Setup* setup, const float* dft_x, const float* dft_hzp, float* dft_ab);
+#if PFFFT_PREFETCH
+/* pffft_prefetch_tu.c */
+void pffft_native_transform_pf(const PFFFT_Setup* setup, const float* input, float* output, float* work,
+                               pffft_direction_t direction);
+void pffft_native_transform_ordered_pf(const PFFFT_Setup* setup, const float* input, float* output, float* work,
+                                       pffft_direction_t direction);
+#endif
 #else
 PFFFT_Setup* pffft_native_new_setup(int N, pffft_transform_t transform, int depth_first);
 #define FUNC_NEW_SETUP            pffft_native_new_setup
@@ -223,6 +276,28 @@ pffft_backend_depth_first(int backend) {
                                                      : PFFFT_DF_AUTO;
 }
 
+/* the flags added to a PFFFT_BACKEND_* backend */
+#define PFFFT_BACKEND_MODIFIERS                                                                                        \
+    (PFFFT_BACKEND_DEPTH_FIRST | PFFFT_BACKEND_BREADTH_FIRST | PFFFT_BACKEND_PREFETCH | PFFFT_BACKEND_NO_PREFETCH)
+
+/* the prefetch mode of the PFFFT_BACKEND_* flags: 1 forced on, -1 off, 0
+   as pffft_new_setup() picks it */
+static int
+pffft_backend_prefetch(int backend) {
+    return (backend & PFFFT_BACKEND_PREFETCH) ? 1 : (backend & PFFFT_BACKEND_NO_PREFETCH) ? -1 : 0;
+}
+
+int
+pffft_internal_prefetch_passes(const PFFFT_Setup* setup) {
+    return (setup->kind & PFFFT_SETUP_PF) != 0;
+}
+
+#if defined(__GNUC__)
+#define PFFFT_UNLIKELY(c) __builtin_expect((c) != 0, 0)
+#else
+#define PFFFT_UNLIKELY(c) (c)
+#endif
+
 #if PFFFT_WIDE
 
 #include "pffft_wide_select.h"
@@ -258,6 +333,33 @@ pffft_x86_cpuid(void* ctx, unsigned leaf, unsigned subleaf, unsigned* r) {
     r[2] = c;
     r[3] = d;
 #endif
+}
+
+/* a setup of the native implementation, with PFFFT_SETUP_PF as
+   'prefetch' (pffft_backend_prefetch()) asks */
+static PFFFT_Setup*
+pffft_native_setup(int N, pffft_transform_t transform, int depth_first, int prefetch) {
+    PFFFT_Setup* s = pffft_native_new_setup(N, transform, depth_first);
+#if PFFFT_PREFETCH
+    /* depth-first setups run other passes (pffft_passes_impl.h) */
+    if (s && prefetch >= 0 && !s->df_levels) {
+        if (prefetch > 0) {
+            s->kind |= PFFFT_SETUP_PF;
+        } else {
+            pffft_x86_cpu_ops ops;
+            ops.cpuid = pffft_x86_cpuid;
+            ops.xgetbv = NULL; /* not needed */
+            ops.ctx = NULL;
+            if (pffft_x86_prefetch_passes(&ops, 2 * (unsigned long long)s->Ncvec * sizeof(v4sf),
+                                          transform == PFFFT_REAL)) {
+                s->kind |= PFFFT_SETUP_PF;
+            }
+        }
+    }
+#else
+    (void)prefetch;
+#endif
+    return s;
 }
 
 static unsigned long long
@@ -317,8 +419,8 @@ pffft_wide_cpu_class(unsigned long long* l2) {
 
 PFFFT_Setup*
 pffft_internal_new_setup(int N, pffft_transform_t transform, int backend) {
-    const int depth_first = pffft_backend_depth_first(backend);
-    backend &= ~(PFFFT_BACKEND_DEPTH_FIRST | PFFFT_BACKEND_BREADTH_FIRST);
+    const int depth_first = pffft_backend_depth_first(backend), prefetch = pffft_backend_prefetch(backend);
+    backend &= ~PFFFT_BACKEND_MODIFIERS;
     if (backend != PFFFT_BACKEND_NATIVE) {
         unsigned long long l2 = 0;
         const int cls = pffft_wide_supports(N, transform) ? pffft_wide_cpu_class(&l2) : -1;
@@ -336,7 +438,7 @@ pffft_internal_new_setup(int N, pffft_transform_t transform, int backend) {
             return pffft_w8_new_setup(N, transform, depth_first);
         }
     }
-    return pffft_native_new_setup(N, transform, depth_first);
+    return pffft_native_setup(N, transform, depth_first, prefetch);
 }
 
 void
@@ -347,21 +449,53 @@ pffft_destroy_setup(PFFFT_Setup* setup) {
 
 void
 pffft_transform(const PFFFT_Setup* setup, const float* input, float* output, float* work, pffft_direction_t direction) {
+#if PFFFT_PREFETCH
+    /* one comparison for a native setup without prefetches, as without
+       PFFFT_PREFETCH; with the other setups out of the way (without the
+       hint, GCC compiled the native path with another prologue, and
+       transforms of 16 to 64 points took 2 to 7% longer on Zen 3) */
+    if (PFFFT_UNLIKELY(setup->kind != PFFFT_SETUP_KIND_NATIVE)) {
+        if (setup->kind == PFFFT_SETUP_KIND_W8) {
+            pffft_w8_transform(setup, input, output, work, direction);
+        } else {
+            pffft_native_transform_pf(setup, input, output, work, direction); /* PFFFT_SETUP_PF */
+        }
+    } else {
+        pffft_native_transform(setup, input, output, work, direction);
+    }
+#else
     if (setup->kind == PFFFT_SETUP_KIND_W8) {
         pffft_w8_transform(setup, input, output, work, direction);
     } else {
         pffft_native_transform(setup, input, output, work, direction);
     }
+#endif
 }
 
 void
 pffft_transform_ordered(const PFFFT_Setup* setup, const float* input, float* output, float* work,
                         pffft_direction_t direction) {
+#if PFFFT_PREFETCH
+    /* one comparison for a native setup without prefetches, as without
+       PFFFT_PREFETCH; with the other setups out of the way (without the
+       hint, GCC compiled the native path with another prologue, and
+       transforms of 16 to 64 points took 2 to 7% longer on Zen 3) */
+    if (PFFFT_UNLIKELY(setup->kind != PFFFT_SETUP_KIND_NATIVE)) {
+        if (setup->kind == PFFFT_SETUP_KIND_W8) {
+            pffft_w8_transform_ordered(setup, input, output, work, direction);
+        } else {
+            pffft_native_transform_ordered_pf(setup, input, output, work, direction); /* PFFFT_SETUP_PF */
+        }
+    } else {
+        pffft_native_transform_ordered(setup, input, output, work, direction);
+    }
+#else
     if (setup->kind == PFFFT_SETUP_KIND_W8) {
         pffft_w8_transform_ordered(setup, input, output, work, direction);
     } else {
         pffft_native_transform_ordered(setup, input, output, work, direction);
     }
+#endif
 }
 
 void
@@ -419,14 +553,22 @@ pffft_zconvolve_zp(const PFFFT_Setup* setup, const float* dft_x, const float* df
 
 #else /* PFFFT_WIDE */
 
+/* without the 8-lane backend's CPU probe no prefetching passes either
+   (PFFFT_PREFETCH) */
+static PFFFT_Setup*
+pffft_native_setup(int N, pffft_transform_t transform, int depth_first, int prefetch) {
+    (void)prefetch;
+    return pffft_native_new_setup(N, transform, depth_first);
+}
+
 PFFFT_Setup*
 pffft_internal_new_setup(int N, pffft_transform_t transform, int backend) {
-    const int depth_first = pffft_backend_depth_first(backend);
-    backend &= ~(PFFFT_BACKEND_DEPTH_FIRST | PFFFT_BACKEND_BREADTH_FIRST);
+    const int depth_first = pffft_backend_depth_first(backend), prefetch = pffft_backend_prefetch(backend);
+    backend &= ~PFFFT_BACKEND_MODIFIERS;
     if (backend == PFFFT_BACKEND_W8) {
         return NULL;
     }
-    return pffft_native_new_setup(N, transform, depth_first);
+    return pffft_native_setup(N, transform, depth_first, prefetch);
 }
 
 #endif /* PFFFT_WIDE */

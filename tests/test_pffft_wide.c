@@ -143,7 +143,7 @@ typedef struct {
     unsigned leaf4[4][4], leaf1d[4][4];
     int n_leaf4, n_leaf1d;
     unsigned max_ext, ecx81, ecx86;
-    int xgetbv_calls, leaf1_calls, leaf7_calls, bad;
+    int xgetbv_calls, leaf0_calls, leaf1_calls, leaf7_calls, bad;
 } fake_cpu;
 
 static void
@@ -170,6 +170,7 @@ fake_cpuid(void* ctx, unsigned leaf, unsigned subleaf, unsigned* r) {
         f->bad = 1; /* unsupported leaf queried */
     }
     if (leaf == 0) {
+        ++f->leaf0_calls;
         r[0] = f->max_leaf;
         r[1] = f->vendor[0];
         r[3] = f->vendor[1];
@@ -556,6 +557,96 @@ test_l2(void) {
     check(l2 == 0 && !bad, "L2: other vendor", (int)(l2 >> 10), bad);
 }
 
+/* ---------------- output prefetching of the 4-lane passes ---------------- */
+
+static int
+prefetch_of(fake_cpu* f, unsigned long long bytes, int real) {
+    pffft_x86_cpu_ops ops = fake_ops(f);
+    return pffft_x86_prefetch_passes(&ops, bytes, real);
+}
+
+static void
+test_prefetch_rule(void) {
+    const unsigned avx2 = PFFFT_X86_EBX7_AVX2 | PFFFT_X86_EBX7_BMI1 | PFFFT_X86_EBX7_BMI2;
+    const int all = 1, none = 0;
+    fake_cpu f;
+    int r;
+
+    /* Intel, 48 KiB L1d in leaf 4 (i7-1065G7, Ice Lake client 7Eh): from
+       24 KiB on */
+    f = fake(intel_vendor, 0x000706E5u, ECX_ALL, avx2, 0x7, 0x1B);
+    cache_entry(f.leaf4[0], 1, 1, 12, 1, 64, 64);
+    cache_entry(f.leaf4[1], 2, 1, 8, 1, 64, 64);
+    cache_entry(f.leaf4[2], 3, 2, 8, 1, 64, 1024);
+    f.n_leaf4 = 3;
+    check(prefetch_of(&f, 24576, 1) == all, "prefetch: Intel 48 KiB, real 24 KiB", 0, 0);
+    check(prefetch_of(&f, 24575, 1) == none, "prefetch: Intel 48 KiB, real below 24 KiB", 0, 0);
+    check(prefetch_of(&f, 12288, 1) == none, "prefetch: Intel 48 KiB, real 12 KiB", 0, 0);
+    check(prefetch_of(&f, 12287, 1) == 0, "prefetch: Intel 48 KiB, real below 12 KiB", 0, 0);
+    check(prefetch_of(&f, 24576, 0) == all, "prefetch: Intel 48 KiB, complex 24 KiB", 0, 0);
+    check(prefetch_of(&f, 24575, 0) == 0, "prefetch: Intel 48 KiB, complex below 24 KiB", 0, 0);
+    check(prefetch_of(&f, 1ull << 30, 0) == all, "prefetch: Intel 48 KiB, complex 1 GiB", 0, 0);
+    check(!f.bad, "prefetch: Intel, only valid leaves", 0, 0);
+    /* the level-1 entry is the data one, not the instruction cache */
+    cache_entry(f.leaf4[0], 2, 1, 8, 1, 64, 64);
+    cache_entry(f.leaf4[1], 1, 1, 8, 1, 64, 64);
+    check(prefetch_of(&f, 16384, 0) == all, "prefetch: Intel 32 KiB L1d after L1i", 0, 0);
+    check(prefetch_of(&f, 16383, 0) == 0, "prefetch: Intel 32 KiB L1d after L1i, below", 0, 0);
+    check(prefetch_of(&f, 16384, 1) == all && prefetch_of(&f, 16383, 1) == none, "prefetch: Intel 32 KiB, real", 0, 0);
+    /* hybrid parts (Alder Lake-S 97h) never */
+    f.eax1 = 0x00090672u;
+    f.edx7 = PFFFT_X86_EDX7_HYBRID;
+    check(prefetch_of(&f, 1ull << 30, 1) == 0, "prefetch: Intel hybrid", 0, 0);
+    /* the same model with only P-cores (i5-12400) */
+    f.edx7 = 0;
+    check(prefetch_of(&f, 1ull << 30, 1) == all, "prefetch: Intel P-cores only", 0, 0);
+    /* Atom cores (Alder Lake-N BEh, Tremont 86h) and other families never */
+    f.eax1 = 0x000B06E0u;
+    check(prefetch_of(&f, 1ull << 30, 1) == 0, "prefetch: Intel Gracemont", 0, 0);
+    f.eax1 = 0x00080665u;
+    check(prefetch_of(&f, 1ull << 30, 0) == 0, "prefetch: Intel Tremont", 0, 0);
+    f.eax1 = 0x00000F43u; /* family 15 */
+    check(prefetch_of(&f, 1ull << 30, 1) == 0, "prefetch: Intel family 15", 0, 0);
+    /* Ice Lake server (6Ah): complex transforms from 1 MiB, real ones as usual */
+    f.eax1 = 0x000606A6u;
+    check(prefetch_of(&f, 16384, 1) == all && prefetch_of(&f, 16383, 1) == none, "prefetch: Ice Lake server, real", 0,
+          0);
+    check(prefetch_of(&f, 1048575, 0) == 0 && prefetch_of(&f, 1048576, 0) == all, "prefetch: Ice Lake server, complex",
+          0, 0);
+    check(!f.bad, "prefetch: Intel models, only valid leaves", 0, 0);
+    /* no level-1 data entry, or no leaf 4, or a size that is not a level-1
+       cache's: never */
+    f = fake(intel_vendor, 0x000306F2u, ECX_ALL, avx2, 0x7, 0xF); /* Haswell-EP 3Fh */
+    cache_entry(f.leaf4[0], 2, 1, 8, 1, 64, 64);
+    cache_entry(f.leaf4[1], 3, 2, 8, 1, 64, 512);
+    f.n_leaf4 = 2;
+    check(prefetch_of(&f, 1ull << 30, 1) == 0, "prefetch: Intel without a level-1 data entry", 0, 0);
+    f.n_leaf4 = 0;
+    check(prefetch_of(&f, 1ull << 30, 1) == 0, "prefetch: Intel with leaf 4 empty", 0, 0);
+    cache_entry(f.leaf4[0], 1, 1, 16, 4, 64, 4096); /* 16 MiB */
+    f.n_leaf4 = 1;
+    check(prefetch_of(&f, 1ull << 30, 1) == 0, "prefetch: Intel, implausible level-1 size", 0, 0);
+    f = fake(intel_vendor, 0x000006F6u, ECX_ALL, 0, 0x7, 0x3);
+    check(prefetch_of(&f, 1ull << 30, 1) == 0 && !f.bad, "prefetch: Intel with max leaf 3", 0, f.bad);
+    /* Haswell without leaf 7 in its maximum leaf still prefetches */
+    f = fake(intel_vendor, 0x000306F2u, ECX_ALL, 0, 0x7, 0x6);
+    cache_entry(f.leaf4[0], 1, 1, 8, 1, 64, 64);
+    f.n_leaf4 = 1;
+    r = prefetch_of(&f, 16384, 0);
+    check(r == all && f.leaf7_calls == 0 && !f.bad, "prefetch: Intel with max leaf 6", r, f.leaf7_calls);
+    /* below 8 KiB no CPUID at all */
+    f = fake(intel_vendor, 0x000706E5u, ECX_ALL, avx2, 0x7, 0x1B);
+    r = prefetch_of(&f, 8191, 1);
+    check(r == 0 && f.leaf0_calls == 0, "prefetch: no probe below 8 KiB", r, f.leaf0_calls);
+    /* other vendors never */
+    f = fake(amd_vendor, 0x00A20F10u, ECX_ALL, avx2, 0x7, 0x10);
+    cache_entry(f.leaf4[0], 1, 1, 8, 1, 64, 64);
+    f.n_leaf4 = 1;
+    check(prefetch_of(&f, 1ull << 30, 1) == 0 && prefetch_of(&f, 1ull << 30, 0) == 0, "prefetch: AMD", 0, 0);
+    f.vendor[0] = 0x6f677948u; /* "Hygo..." */
+    check(prefetch_of(&f, 1ull << 30, 1) == 0, "prefetch: other vendor", 0, 0);
+}
+
 /* ---------------- default selection rule ---------------- */
 
 /* the measured table of a CPU class, NULL for the others */
@@ -832,6 +923,68 @@ this_cpu_class(unsigned long long* l2) {
     return PFFFT_X86_WIDE_OFF;
 }
 #endif
+
+/* the setups' prefetch flags: forced on or off, and by default as the rule
+   above gives them for this CPU */
+static void
+test_prefetch_setup(void) {
+    static const int sizes[] = {256, 1024, 2048, 3072, 4096, 8192, 65536};
+    int k, cplx, built = -1;
+    for (cplx = 0; cplx < 2; ++cplx) {
+        const pffft_transform_t t = cplx ? PFFFT_COMPLEX : PFFFT_REAL;
+        for (k = 0; k < (int)(sizeof(sizes) / sizeof(sizes[0])); ++k) {
+            const int N = sizes[k];
+            PFFFT_Setup* on = pffft_internal_new_setup(
+                N, t, PFFFT_BACKEND_NATIVE | PFFFT_BACKEND_BREADTH_FIRST | PFFFT_BACKEND_PREFETCH);
+            PFFFT_Setup* off = pffft_internal_new_setup(
+                N, t, PFFFT_BACKEND_NATIVE | PFFFT_BACKEND_BREADTH_FIRST | PFFFT_BACKEND_NO_PREFETCH);
+            PFFFT_Setup* def = pffft_internal_new_setup(N, t, PFFFT_BACKEND_NATIVE | PFFFT_BACKEND_BREADTH_FIRST);
+            PFFFT_Setup* w8 = pffft_internal_new_setup(N, t, PFFFT_BACKEND_W8 | PFFFT_BACKEND_PREFETCH);
+            int p_on, expect = 0;
+            if (!on || !off || !def) {
+                check(0, "prefetch: setup", N, cplx);
+                goto next;
+            }
+            p_on = pffft_internal_prefetch_passes(on);
+            if (built < 0) {
+                built = p_on == 1; /* the build has the prefetching passes */
+            }
+            check(p_on == built, "prefetch: forced on", N, p_on);
+            check(pffft_internal_prefetch_passes(off) == 0, "prefetch: forced off", N, cplx);
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(_M_ARM64EC)
+            if (built) {
+                pffft_x86_cpu_ops ops;
+                int f;
+                ops.cpuid = real_cpuid;
+                ops.xgetbv = real_xgetbv;
+                ops.ctx = NULL;
+                f = pffft_x86_prefetch_passes(&ops, 4ull * N * (cplx ? 2 : 1), !cplx);
+                expect = f;
+            }
+#endif
+            check(pffft_internal_prefetch_passes(def) == expect, "prefetch: default", N, cplx);
+            check(!w8 || pffft_internal_prefetch_passes(w8) == 0, "prefetch: 8-lane setups never", N, cplx);
+        next:
+            pffft_destroy_setup(on);
+            pffft_destroy_setup(off);
+            pffft_destroy_setup(def);
+            pffft_destroy_setup(w8);
+        }
+    }
+    printf("prefetching passes: %s in this build\n", built > 0 ? "present" : "not present");
+    {
+        /* builds with the 8-lane backend have them, unless built with
+           PFFFT_DISABLE_PREFETCH (tests/CMakeLists.txt passes it on) */
+        const char* require_wide = getenv("PFFFT_TEST_REQUIRE_WIDE");
+#if defined(PFFFT_DISABLE_PREFETCH)
+        check(built == 0, "prefetch: present although PFFFT_DISABLE_PREFETCH", built, 0);
+        (void)require_wide;
+#else
+        check(built > 0 || !require_wide || strcmp(require_wide, "1") != 0,
+              "prefetch: required with the 8-lane backend (PFFFT_TEST_REQUIRE_WIDE=1)", built, 0);
+#endif
+    }
+}
 
 static void
 test_size_table(int have_wide) {
@@ -1257,9 +1410,11 @@ main(void) {
     test_probe();
     test_classes();
     test_l2();
+    test_prefetch_rule();
     test_select_rule();
     test_selection(have_wide);
     test_size_table(have_wide);
+    test_prefetch_setup();
     if (have_wide) {
         test_wide_plan();
         test_alignment();

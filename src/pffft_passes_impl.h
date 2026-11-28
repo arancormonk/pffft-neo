@@ -128,6 +128,73 @@
             body(__VA_ARGS__, -1.f);                                                                                   \
         }                                                                                                              \
     }
+
+/*
+  Prefetching the output of the passes (PFFFT_PREFETCH, 4-lane SSE only).
+
+  Out of the level-1 data cache the passes are bound by their stores: an
+  iteration writes 3 to 8 output streams, and the lines of the store misses
+  arrive too late. On an Intel core a prefetch of each stream PF_PREFETCH_DIST
+  bytes ahead of the store made real transforms 20 to 38% faster there and
+  complex ones 9 to 18% (Haswell, Xeon E5-2697 v3); within the cache the
+  prefetches cost up to 3.5%, and AMD Zen cores lost 1.5 to 7.5% with them
+  at every size. pffft_new_setup() therefore chooses per setup
+  (pffft_x86_prefetch_passes() in pffft_cpu_x86.h).
+
+  The including file sets PF_PREFETCH_PASSES. With 0 (pffft.c, the 8-lane
+  backend, the other backends) the PF_PREFETCH statements below are empty
+  and the passes are those of a build without prefetching. With 1
+  (pffft_prefetch_tu.c, a translation unit of its own, so that the code of
+  pffft.c stays as it is) every pass of that unit prefetches, except the
+  in-place codelets (PF_INPLACE_CODELETS 1), used by the in-place first
+  pass and the depth-first schedule, which were not measured with them.
+  Passes without PF_PREFETCH: radix 2 (the plans of PFFFT_TERMINAL_RADIX8
+  have none with 4 lanes), the complex radix 5 (0 to 2% slower with
+  prefetches on Haswell, as in upstream PFFFT), radf8_ps and radf6_ps and
+  the shapes whose output is one stream (the hardware prefetcher follows
+  it), except radf4_ps at ido 3 and 4, whose loop prefetches for its single
+  interior pair.
+
+  - PF_PREFETCH_DIST is 128 bytes, two lines: 64 and 256 measured within 2%
+    of it on Haswell, as on upstream PFFFT's Xeons.
+  - Near the end of a stream the address lies beyond the array, which a
+    prefetch never faults on; it is formed in uintptr_t, as a pointer that
+    far out would be undefined. GCC compiles that as the pointer form;
+    Clang's code took 0 to 4% longer than with pointer arithmetic
+    (Haswell), against the 10 to 38% the prefetches save.
+  - prefetcht0 is SSE: baseline code. Prefetching never changes a result.
+*/
+#ifndef PF_PREFETCH_PASSES
+#error "pffft_passes_impl.h: the including file has to define PF_PREFETCH_PASSES to 0 or 1"
+#endif
+#if PF_PREFETCH_PASSES
+#define PF_PREFETCH_DIST    128
+
+/* prefetch the line PF_PREFETCH_DIST bytes after (dir = 1) or before
+   (dir = -1) p */
+static ALWAYS_INLINE(void) pf_prefetch_line(const void* p, int dir) {
+    const uintptr_t a = (uintptr_t)p + (uintptr_t)(intptr_t)(dir * PF_PREFETCH_DIST);
+    // NOLINTNEXTLINE(performance-no-int-to-ptr) -- the address may lie beyond the array: no pointer arithmetic.
+    _mm_prefetch((const char*)a, _MM_HINT_T0);
+}
+
+#define PF_PREFETCH(p, dir) pf_prefetch_line(p, dir)
+#else
+#define PF_PREFETCH(p, dir)
+#endif
+/* the streams p, p + s, ..., p + 5 s (or 7 s), forward; written out: MSVC
+   does not unroll a loop of them */
+#define PF_PREFETCH6(p, s)                                                                                             \
+    PF_PREFETCH((p), 1);                                                                                               \
+    PF_PREFETCH((p) + (s), 1);                                                                                         \
+    PF_PREFETCH((p) + 2 * (s), 1);                                                                                     \
+    PF_PREFETCH((p) + 3 * (s), 1);                                                                                     \
+    PF_PREFETCH((p) + 4 * (s), 1);                                                                                     \
+    PF_PREFETCH((p) + 5 * (s), 1)
+#define PF_PREFETCH8(p, s)                                                                                             \
+    PF_PREFETCH6(p, s);                                                                                                \
+    PF_PREFETCH((p) + 6 * (s), 1);                                                                                     \
+    PF_PREFETCH((p) + 7 * (s), 1)
 #endif
 
 /*
@@ -179,6 +246,9 @@ static ALWAYS_INLINE(void)
     assert(ido >= 2); /* ido == 2 (one complex element) is reached when SIMD_SZ == 1 */
     for (k = 0; k < l1ido; k += ido, cc += 3 * ido, ch += ido) {
         for (i = 0; i < ido - 1; i += 2) {
+            PF_PREFETCH(ch + i, 1);
+            PF_PREFETCH(ch + i + l1ido, 1);
+            PF_PREFETCH(ch + i + 2 * l1ido, 1);
             tr2 = VADD(VLD(cc, i + ido), VLD(cc, i + 2 * ido));
             cr2 = SVMADD(taur, tr2, VLD(cc, i));
             VST(ch, i, VADD(VLD(cc, i), tr2));
@@ -216,6 +286,10 @@ static ALWAYS_INLINE(void)
     int l1ido = l1 * ido;
     if (ido == 2) {
         for (k = 0; k < l1ido; k += ido, ch += ido, cc += 4 * ido) {
+            PF_PREFETCH(ch, 1);
+            PF_PREFETCH(ch + l1ido, 1);
+            PF_PREFETCH(ch + 2 * l1ido, 1);
+            PF_PREFETCH(ch + 3 * l1ido, 1);
             tr1 = VSUB(VLD(cc, 0), VLD(cc, 2 * ido + 0));
             tr2 = VADD(VLD(cc, 0), VLD(cc, 2 * ido + 0));
             ti1 = VSUB(VLD(cc, 1), VLD(cc, 2 * ido + 1));
@@ -238,6 +312,10 @@ static ALWAYS_INLINE(void)
         for (k = 0; k < l1ido; k += ido, ch += ido, cc += 4 * ido) {
             for (i = 0; i < ido - 1; i += 2) {
                 float wr1, wi1, wr2, wi2, wr3, wi3;
+                PF_PREFETCH(ch + i, 1);
+                PF_PREFETCH(ch + i + l1ido, 1);
+                PF_PREFETCH(ch + i + 2 * l1ido, 1);
+                PF_PREFETCH(ch + i + 3 * l1ido, 1);
                 tr1 = VSUB(VLD(cc, i + 0), VLD(cc, i + 2 * ido + 0));
                 tr2 = VADD(VLD(cc, i + 0), VLD(cc, i + 2 * ido + 0));
                 ti1 = VSUB(VLD(cc, i + 1), VLD(cc, i + 2 * ido + 1));
@@ -461,6 +539,7 @@ static NEVER_INLINE(void) passf8_ps(int ido, int l1, const v4sf* cc, v4sf* ch, f
         VST(ch, (m) * l1ido + 1, b);                                                                                   \
     }
         for (k = 0; k < l1ido; k += ido, ch += ido, cc += 8 * ido) {
+            PF_PREFETCH8(ch, l1ido);
             PF_PASS8(cc, 0, 1, PF_ST8)
         }
 #undef PF_ST8
@@ -471,6 +550,7 @@ static NEVER_INLINE(void) passf8_ps(int ido, int l1, const v4sf* cc, v4sf* ch, f
         VST(ch, (m) * l1ido, b);                                                                                       \
     }
         for (k = 0; k < l1ido; k += ido, ch += ido, cc += 8 * ido) {
+            PF_PREFETCH8(ch, l1ido);
             PF_PASS8(cc, 1, 0, PF_ST8)
         }
 #undef PF_ST8
@@ -629,6 +709,7 @@ static NEVER_INLINE(void) passf6_ps(int ido, int l1, const v4sf* cc, v4sf* ch, f
         VST(ch, (m) * l1ido + 1, b);                                                                                   \
     }
         for (k = 0; k < l1ido; k += ido, ch += ido, cc += 6 * ido) {
+            PF_PREFETCH6(ch, l1ido);
             PF_PASS6(cc, 0, 1, PF_ST6)
         }
 #undef PF_ST6
@@ -639,6 +720,7 @@ static NEVER_INLINE(void) passf6_ps(int ido, int l1, const v4sf* cc, v4sf* ch, f
         VST(ch, (m) * l1ido, b);                                                                                       \
     }
         for (k = 0; k < l1ido; k += ido, ch += ido, cc += 6 * ido) {
+            PF_PREFETCH6(ch, l1ido);
             PF_PASS6(cc, 1, 0, PF_ST6)
         }
 #undef PF_ST6
@@ -765,6 +847,9 @@ static ALWAYS_INLINE(void) radf3_rows(int ido, int l1, int k, const v4sf* RESTRI
     v4sf ci2, di2, di3, cr2, dr2, dr3, ti2, ti3, tr2, tr3, wr1, wi1, wr2, wi2;
     for (i = 2; i < ido; i += 2) {
         ic = ido - i;
+        PF_PREFETCH(ch + i - 1 + 3 * k * ido, 1);
+        PF_PREFETCH(ch + i - 1 + (3 * k + 2) * ido, 1);
+        PF_PREFETCH(ch + ic - 1 + (3 * k + 1) * ido, -1);
         wr1 = LD_PS1(wa1[i - 2]);
         wi1 = LD_PS1(wa1[i - 1]);
         dr2 = VLD(cc, i - 1 + (k + l1) * ido);
@@ -883,6 +968,9 @@ static ALWAYS_INLINE(void) radb3_rows(int ido, int l1, int k, const v4sf* RESTRI
     v4sf ci2, ci3, di2, di3, cr2, cr3, dr2, dr3, ti2, tr2;
     for (i = 2; i < ido; i += 2) {
         ic = ido - i;
+        PF_PREFETCH(ch + i - 1 + k * ido, 1);
+        PF_PREFETCH(ch + i - 1 + (k + l1) * ido, 1);
+        PF_PREFETCH(ch + i - 1 + (k + 2 * l1) * ido, 1);
         tr2 = VADD(VLD(cc, i - 1 + (3 * k + 2) * ido), VLD(cc, ic - 1 + (3 * k + 1) * ido));
         cr2 = SVMADD(taur, tr2, VLD(cc, i - 1 + 3 * k * ido));
         VST(ch, i - 1 + k * ido, VADD(VLD(cc, i - 1 + 3 * k * ido), tr2));
@@ -935,6 +1023,17 @@ static NEVER_INLINE(void)
     }
 #endif
     assert(ido % 2 == 1); /* else from terminal_merge_plan only */
+#if PF_PREFETCH_PASSES
+    if (ido == 1) { /* the DC loop alone, with its streams l1 apart */
+        for (k = 0; k < l1; k++) {
+            PF_PREFETCH(ch + k, 1);
+            PF_PREFETCH(ch + k + l1, 1);
+            PF_PREFETCH(ch + k + 2 * l1, 1);
+            radb3_dc(1, l1, k, cc, ch);
+        }
+        return;
+    }
+#endif
     for (k = 0; k < l1; k++) {
         radb3_dc(ido, l1, k, cc, ch);
     }
@@ -989,6 +1088,10 @@ static ALWAYS_INLINE(void) radf4_groups(int ido, int l1, const v4sf* RESTRICT cc
         VST(ch, 4 * ido - 1, VSUB(tr2, tr1));
 
         for (int i = 2; i < ido; i += 2) {
+            PF_PREFETCH(ch + i - 1, 1);
+            PF_PREFETCH(ch + 2 * ido + i - 1, 1);
+            PF_PREFETCH(ch + 2 * ido - i - 1, -1);
+            PF_PREFETCH(ch + 4 * ido - i - 1, -1);
             v4sf cr2 = VLD(cc, stride + i - 1), ci2 = VLD(cc, stride + i);
             v4sf cr3 = VLD(cc, 2 * stride + i - 1), ci3 = VLD(cc, 2 * stride + i);
             v4sf cr4 = VLD(cc, 3 * stride + i - 1), ci4 = VLD(cc, 3 * stride + i);
@@ -1047,6 +1150,14 @@ static ALWAYS_INLINE(void) radb4_groups(int ido, int l1, const v4sf* RESTRICT cc
     static const float minus_sqrt2 = (float)-M_SQRT2, two = 2.f;
     const int stride = l1 * ido;
     for (int k = 0; k < l1; ++k, cc += 4 * ido, ch += ido) {
+#if PF_PREFETCH_PASSES
+        if (ido == 1) { /* the last backward pass: 4 streams l1 apart */
+            PF_PREFETCH(ch, 1);
+            PF_PREFETCH(ch + stride, 1);
+            PF_PREFETCH(ch + 2 * stride, 1);
+            PF_PREFETCH(ch + 3 * stride, 1);
+        }
+#endif
         v4sf a = VLD(cc, 0), b = VLD(cc, 4 * ido - 1);
         v4sf c = SVMUL(two, VLD(cc, 2 * ido)), d = SVMUL(two, VLD(cc, 2 * ido - 1));
         v4sf sum = VADD(a, b), diff = VSUB(a, b);
@@ -1056,6 +1167,10 @@ static ALWAYS_INLINE(void) radb4_groups(int ido, int l1, const v4sf* RESTRICT cc
         VST(ch, 3 * stride, VADD(diff, c));
 
         for (int i = 2; i < ido; i += 2) {
+            PF_PREFETCH(ch + i - 1, 1);
+            PF_PREFETCH(ch + stride + i - 1, 1);
+            PF_PREFETCH(ch + 2 * stride + i - 1, 1);
+            PF_PREFETCH(ch + 3 * stride + i - 1, 1);
             v4sf r0 = VLD(cc, i - 1), r1 = VLD(cc, 2 * ido - i - 1);
             v4sf r2 = VLD(cc, 2 * ido + i - 1), r3 = VLD(cc, 4 * ido - i - 1);
             v4sf i0 = VLD(cc, i), i1 = VLD(cc, 2 * ido - i);
@@ -1147,6 +1262,11 @@ static ALWAYS_INLINE(void)
         tr4, tr5;
     for (i = 3; i <= ido; i += 2) {
         ic = idp2 - i;
+        PF_PREFETCH(ch + ch_idx(i - 1, 1, k), 1);
+        PF_PREFETCH(ch + ch_idx(i - 1, 3, k), 1);
+        PF_PREFETCH(ch + ch_idx(i - 1, 5, k), 1);
+        PF_PREFETCH(ch + ch_idx(ic - 1, 2, k), -1);
+        PF_PREFETCH(ch + ch_idx(ic - 1, 4, k), -1);
         dr2 = LD_PS1(wa1[i - 3]);
         di2 = LD_PS1(wa1[i - 2]);
         dr3 = LD_PS1(wa2[i - 3]);
@@ -1276,6 +1396,11 @@ static ALWAYS_INLINE(void)
         tr4, tr5;
     for (i = 3; i <= ido; i += 2) {
         ic = idp2 - i;
+        PF_PREFETCH(ch + ch_idx(i - 1, k, 1), 1);
+        PF_PREFETCH(ch + ch_idx(i - 1, k, 2), 1);
+        PF_PREFETCH(ch + ch_idx(i - 1, k, 3), 1);
+        PF_PREFETCH(ch + ch_idx(i - 1, k, 4), 1);
+        PF_PREFETCH(ch + ch_idx(i - 1, k, 5), 1);
         ti5 = VADD(VLD(cc, cc_idx(i, 3, k)), VLD(cc, cc_idx(ic, 2, k)));
         ti2 = VSUB(VLD(cc, cc_idx(i, 3, k)), VLD(cc, cc_idx(ic, 2, k)));
         ti4 = VADD(VLD(cc, cc_idx(i, 5, k)), VLD(cc, cc_idx(ic, 4, k)));
@@ -1358,6 +1483,19 @@ static NEVER_INLINE(void) radb5_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
     }
 #endif
     assert(ido % 2 == 1); /* else from terminal_merge_plan only */
+#if PF_PREFETCH_PASSES
+    if (ido == 1) { /* the DC loop alone, with its streams l1 apart */
+        for (k = 1; k <= l1; ++k) {
+            PF_PREFETCH(ch + (k - 1), 1);
+            PF_PREFETCH(ch + (k - 1) + l1, 1);
+            PF_PREFETCH(ch + (k - 1) + 2 * l1, 1);
+            PF_PREFETCH(ch + (k - 1) + 3 * l1, 1);
+            PF_PREFETCH(ch + (k - 1) + 4 * l1, 1);
+            radb5_dc(1, l1, k, cc, ch);
+        }
+        return;
+    }
+#endif
     for (k = 1; k <= l1; ++k) {
         radb5_dc(ido, l1, k, cc, ch);
     }
@@ -1441,6 +1579,10 @@ static NEVER_INLINE(void) radb8_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
         const v4sf* c0 = cc;
         v4sf* h0 = ch;
         for (k = 0; k < l1; ++k, cc += 8, ++ch) {
+            PF_PREFETCH(ch, 1);
+            PF_PREFETCH(ch + 2 * l1, 1);
+            PF_PREFETCH(ch + 4 * l1, 1);
+            PF_PREFETCH(ch + 6 * l1, 1);
             v4sf r0 = VLD(cc, 0), r1 = VLD(cc, 1), i1 = VLD(cc, 2), r2 = VLD(cc, 3);
             v4sf r3 = VLD(cc, 5), i3 = VLD(cc, 6), r4 = VLD(cc, 7);
             v4sf p = VADD(r0, r4), a = VADD(r1, r3), c = VSUB(i3, i1);
@@ -1451,6 +1593,10 @@ static NEVER_INLINE(void) radb8_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
             VST(ch, 6 * l1, VMSUB(two, c, e2));
         }
         for (cc = c0, ch = h0, k = 0; k < l1; ++k, cc += 8, ++ch) {
+            PF_PREFETCH(ch + l1, 1);
+            PF_PREFETCH(ch + 3 * l1, 1);
+            PF_PREFETCH(ch + 5 * l1, 1);
+            PF_PREFETCH(ch + 7 * l1, 1);
             v4sf r0 = VLD(cc, 0), r1 = VLD(cc, 1), i1 = VLD(cc, 2);
             v4sf i2 = VLD(cc, 4), r3 = VLD(cc, 5), i3 = VLD(cc, 6), r4 = VLD(cc, 7);
             v4sf q = VSUB(r0, r4), b = VSUB(r1, r3), d = VADD(i1, i3);
@@ -1464,6 +1610,7 @@ static NEVER_INLINE(void) radb8_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
         return;
     }
     for (k = 0; k < l1; ++k, cc += 8, ++ch) {
+        PF_PREFETCH8(ch, l1);
         v4sf r0 = VLD(cc, 0), r1 = VLD(cc, 1), i1 = VLD(cc, 2), r2 = VLD(cc, 3);
         v4sf i2 = VLD(cc, 4), r3 = VLD(cc, 5), i3 = VLD(cc, 6), r4 = VLD(cc, 7);
         v4sf p = VADD(r0, r4), q = VSUB(r0, r4);
@@ -1521,6 +1668,7 @@ static NEVER_INLINE(void) radb6_ps(int ido, int l1, const v4sf* RESTRICT cc, v4s
     assert(ido == 1);
     (void)ido; /* otherwise unused when assertions are disabled */
     for (k = 0; k < l1; ++k, cc += 6, ++ch) {
+        PF_PREFETCH6(ch, l1);
         v4sf x0 = VLD(cc, 0), r1 = VLD(cc, 1), i1 = VLD(cc, 2);
         v4sf r2 = VLD(cc, 3), i2 = VLD(cc, 4), x3 = VLD(cc, 5);
         v4sf u0 = VMADD(two, r2, x0), a = VSUB(x0, r2), b = VMUL(sq3, i2);
@@ -2042,6 +2190,9 @@ static ALWAYS_INLINE(void)
     float wr1, wi1, wr2, wi2;
     assert(ido >= 2);
     for (i = 0; i < ido - 1; i += 2) {
+        PF_PREFETCH(ch + i, 1);
+        PF_PREFETCH(ch + i + ido, 1);
+        PF_PREFETCH(ch + i + 2 * ido, 1);
         PF_UNINTERLEAVE2(VLD(in, i), VLD(in, i + 1), c0r, c0i);
         PF_UNINTERLEAVE2(VLD(in, i + ido), VLD(in, i + ido + 1), c1r, c1i);
         PF_UNINTERLEAVE2(VLD(in, i + 2 * ido), VLD(in, i + 2 * ido + 1), c2r, c2i);
@@ -2118,6 +2269,10 @@ static ALWAYS_INLINE(void)
         for (i = 0; i < ido - 1; i += 2) {
             v4sf ci2, ci3, ci4, cr2, cr3, cr4, ti1, ti2, ti3, ti4, tr1, tr2, tr3, tr4;
             float wr1, wi1, wr2, wi2, wr3, wi3;
+            PF_PREFETCH(ch + i, 1);
+            PF_PREFETCH(ch + i + ido, 1);
+            PF_PREFETCH(ch + i + 2 * ido, 1);
+            PF_PREFETCH(ch + i + 3 * ido, 1);
             PF_UNINTERLEAVE2(VLD(in, i), VLD(in, i + 1), c0r, c0i);
             PF_UNINTERLEAVE2(VLD(in, i + ido), VLD(in, i + ido + 1), c1r, c1i);
             PF_UNINTERLEAVE2(VLD(in, i + 2 * ido), VLD(in, i + 2 * ido + 1), c2r, c2i);
@@ -2257,6 +2412,10 @@ static ALWAYS_INLINE(void) passf4_ol_body(int l1, const v4sf* RESTRICT cc, v4sf*
     int k;
     for (k = 0; k < l1ido; k += ido, out += ido, cc += 4 * ido) {
         v4sf y[8];
+        PF_PREFETCH(out, 1);
+        PF_PREFETCH(out + l1ido, 1);
+        PF_PREFETCH(out + 2 * l1ido, 1);
+        PF_PREFETCH(out + 3 * l1ido, 1);
         passf4_il_butterfly(VLD(cc, 0), VLD(cc, 1), VLD(cc, ido + 0), VLD(cc, ido + 1), VLD(cc, 2 * ido + 0),
                             VLD(cc, 2 * ido + 1), VLD(cc, 3 * ido + 0), VLD(cc, 3 * ido + 1), fsign, y);
         PF_INTERLEAVE2_ST(y[0], y[1], out, 0 * l1ido + 0, 0 * l1ido + 1);
@@ -2282,12 +2441,14 @@ static NEVER_INLINE(void) passf8_ol_ps(int l1, const v4sf* cc, v4sf* out, float 
     if (fsign < 0) {
 #define PF_ST8(m, a, b) PF_INTERLEAVE2_ST(a, b, out, (m) * l1ido, (m) * l1ido + 1);
         for (k = 0; k < l1ido; k += ido, out += ido, cc += 8 * ido) {
+            PF_PREFETCH8(out, l1ido);
             PF_PASS8(cc, 0, 1, PF_ST8)
         }
 #undef PF_ST8
     } else {
 #define PF_ST8(m, a, b) PF_INTERLEAVE2_ST(b, a, out, (m) * l1ido, (m) * l1ido + 1);
         for (k = 0; k < l1ido; k += ido, out += ido, cc += 8 * ido) {
+            PF_PREFETCH8(out, l1ido);
             PF_PASS8(cc, 1, 0, PF_ST8)
         }
 #undef PF_ST8
@@ -2303,12 +2464,14 @@ static NEVER_INLINE(void) passf6_ol_ps(int l1, const v4sf* cc, v4sf* out, float 
     if (fsign < 0) {
 #define PF_ST6(m, a, b) PF_INTERLEAVE2_ST(a, b, out, (m) * l1ido, (m) * l1ido + 1);
         for (k = 0; k < l1ido; k += ido, out += ido, cc += 6 * ido) {
+            PF_PREFETCH6(out, l1ido);
             PF_PASS6(cc, 0, 1, PF_ST6)
         }
 #undef PF_ST6
     } else {
 #define PF_ST6(m, a, b) PF_INTERLEAVE2_ST(b, a, out, (m) * l1ido, (m) * l1ido + 1);
         for (k = 0; k < l1ido; k += ido, out += ido, cc += 6 * ido) {
+            PF_PREFETCH6(out, l1ido);
             PF_PASS6(cc, 1, 0, PF_ST6)
         }
 #undef PF_ST6
@@ -2349,7 +2512,15 @@ static NEVER_INLINE(void) passf6_ol_ps(int l1, const v4sf* cc, v4sf* out, float 
 */
 #undef PF_INPLACE_CODELETS
 #define PF_INPLACE_CODELETS 1
+#if PF_PREFETCH_PASSES /* not measured with prefetches: none */
+#undef PF_PREFETCH
+#define PF_PREFETCH(p, dir)
+#endif
 #include "pffft_passes_impl.h"
+#if PF_PREFETCH_PASSES
+#undef PF_PREFETCH
+#define PF_PREFETCH(p, dir) pf_prefetch_line(p, dir)
+#endif
 #undef PF_INPLACE_CODELETS
 #define PF_INPLACE_CODELETS 0
 
@@ -2961,4 +3132,8 @@ cfftb1_df_ps(int n, v4sf* x, v4sf* out, v4sf* tmp, const float* wa, const int* i
 #undef PF_CODELET_NAME
 #undef PF_CODELET_RESTRICT
 #undef PF_PASS_DIRECTIONS
+#undef PF_PREFETCH
+#undef PF_PREFETCH6
+#undef PF_PREFETCH8
+#undef PF_PREFETCH_DIST
 #endif
